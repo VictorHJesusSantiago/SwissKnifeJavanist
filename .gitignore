@@ -1,0 +1,9 @@
+build/
+target/
+data/
+out/
+.idea/
+*.iml
+intellij-plugin/.gradle/
+intellij-plugin/build/
+spring-backends/**/target/
