@@ -1,0 +1,18 @@
+<idea-plugin>
+    <id>dev.swissknife.intellij</id>
+    <name>SwissKnife Javanist</name>
+    <vendor>SwissKnife</vendor>
+    <description>Executa documentação e análise de débito técnico diretamente no projeto.</description>
+    <depends>com.intellij.modules.platform</depends>
+    <actions>
+        <group id="SwissKnife.Menu" text="SwissKnife" popup="true">
+            <add-to-group group-id="ToolsMenu" anchor="last"/>
+            <action id="SwissKnife.GenerateDocs"
+                    class="dev.swissknife.intellij.GenerateDocsAction"
+                    text="Gerar documentação"/>
+            <action id="SwissKnife.ScanDebt"
+                    class="dev.swissknife.intellij.ScanDebtAction"
+                    text="Analisar débito técnico"/>
+        </group>
+    </actions>
+</idea-plugin>

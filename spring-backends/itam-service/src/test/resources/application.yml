@@ -1,0 +1,10 @@
+debug: false
+spring:
+  datasource:
+    url: jdbc:h2:mem:itam-test;DB_CLOSE_DELAY=-1
+  jpa:
+    hibernate:
+      ddl-auto: validate
+logging:
+  level:
+    root: WARN
