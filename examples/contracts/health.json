@@ -1,0 +1,6 @@
+{
+  "method": "GET",
+  "url": "http://127.0.0.1:8081/health",
+  "expectedStatus": 200,
+  "bodyContains": ["UP", "vulnerabilities"]
+}

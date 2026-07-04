@@ -1,0 +1,10 @@
+{
+  "className": "OrdersSimulation",
+  "baseUrl": "http://localhost:8080",
+  "users": 100,
+  "rampSeconds": 30,
+  "endpoints": [
+    {"method": "GET", "path": "/api/orders", "expectedStatus": 200},
+    {"method": "GET", "path": "/health", "expectedStatus": 200}
+  ]
+}
