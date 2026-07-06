@@ -18,6 +18,8 @@ public final class AssetServer {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
         server.createContext("/health", e -> HttpSupport.json(e, 200, Map.of("status", "UP", "service", "itam")));
+        server.createContext("/ready", e -> HttpSupport.json(e, 200, Map.of("status", "READY", "records", store.all().size())));
+        server.createContext("/version", e -> HttpSupport.json(e, 200, Map.of("service", "itam", "apiVersion", "v1")));
         server.createContext("/api/v1/assets", HttpSupport.authenticated(this::handle));
         server.createContext("/api/v1/inventory", HttpSupport.authenticated(this::inventory));
     }
@@ -29,7 +31,7 @@ public final class AssetServer {
         String id = HttpSupport.resourceId(e, "/api/v1/assets");
         switch (e.getRequestMethod()) {
             case "GET" -> {
-                if (id == null) HttpSupport.json(e, 200, store.all());
+                if (id == null) HttpSupport.json(e, 200, HttpSupport.filter(store.all(), HttpSupport.query(e)));
                 else store.find(id).ifPresentOrElse(v -> send(e, 200, v), () -> send(e, 404, Map.of("error", "Ativo não encontrado")));
             }
             case "POST" -> {
