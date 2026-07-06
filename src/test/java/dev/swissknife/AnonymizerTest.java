@@ -9,7 +9,7 @@ public final class AnonymizerTest {
         var input = root.resolve("input.csv");
         var policy = root.resolve("policy.properties");
         var output = root.resolve("output.csv");
-        Files.writeString(input, "name,email,city\nAna,ana@real.com,Recife\n");
+        Files.writeString(input, "\uFEFFname,email,city\nAna,ana@real.com,Recife\n");
         Files.writeString(policy, "name=name\nemail=email\n");
         new DataAnonymizer().anonymize(input, policy, output);
         var result = Files.readString(output);

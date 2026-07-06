@@ -1,0 +1,6 @@
+# Quality gate local
+quality src/main/java
+security-scan .
+dependency-audit .
+spring-audit spring-backends
+debt .
