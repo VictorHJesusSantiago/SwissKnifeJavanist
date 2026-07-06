@@ -1,0 +1,26 @@
+name: SwissKnife Javanist
+description: Executa quality gates de governança para projetos Java
+inputs:
+  command:
+    description: Comando e argumentos da CLI
+    required: false
+    default: quality .
+  java-version:
+    description: Versão do Java
+    required: false
+    default: "21"
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-java@v4
+      with:
+        distribution: temurin
+        java-version: ${{ inputs.java-version }}
+    - shell: bash
+      run: |
+        "$GITHUB_ACTION_PATH/build.sh"
+        java -jar "$GITHUB_ACTION_PATH/build/swissknife.jar" ${{ inputs.command }} --format sarif --output "$RUNNER_TEMP/swissknife.sarif"
+    - uses: github/codeql-action/upload-sarif@v3
+      if: always()
+      with:
+        sarif_file: ${{ runner.temp }}/swissknife.sarif
