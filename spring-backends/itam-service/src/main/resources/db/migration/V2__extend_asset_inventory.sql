@@ -1,0 +1,16 @@
+ALTER TABLE assets ADD COLUMN manufacturer VARCHAR(255);
+ALTER TABLE assets ADD COLUMN model VARCHAR(255);
+ALTER TABLE assets ADD COLUMN hostname VARCHAR(255);
+ALTER TABLE assets ADD COLUMN ip_address VARCHAR(64);
+ALTER TABLE assets ADD COLUMN mac_address VARCHAR(64);
+ALTER TABLE assets ADD COLUMN operating_system VARCHAR(255);
+ALTER TABLE assets ADD COLUMN os_version VARCHAR(100);
+ALTER TABLE assets ADD COLUMN location_name VARCHAR(255);
+ALTER TABLE assets ADD COLUMN department VARCHAR(255);
+ALTER TABLE assets ADD COLUMN cost_center VARCHAR(255);
+ALTER TABLE assets ADD COLUMN vendor VARCHAR(255);
+ALTER TABLE assets ADD COLUMN warranty_end DATE;
+ALTER TABLE assets ADD COLUMN notes VARCHAR(4000);
+ALTER TABLE assets ADD COLUMN tags VARCHAR(2000);
+CREATE INDEX idx_asset_location_department ON assets(location_name, department);
+CREATE INDEX idx_asset_warranty_end ON assets(warranty_end);
