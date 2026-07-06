@@ -6,6 +6,7 @@ public final class Csv {
     private Csv() {}
 
     public static List<String> parseLine(String line) {
+        if (line != null && !line.isEmpty() && line.charAt(0) == '\uFEFF') line = line.substring(1);
         List<String> cells = new ArrayList<>();
         var current = new StringBuilder();
         boolean quoted = false;

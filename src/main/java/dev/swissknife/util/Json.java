@@ -55,6 +55,7 @@ public final class Json {
     }
 
     public static Object parse(String json) {
+        if (json != null && !json.isEmpty() && json.charAt(0) == '\uFEFF') json = json.substring(1);
         return new Parser(json).parse();
     }
 
