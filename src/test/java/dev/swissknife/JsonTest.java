@@ -10,5 +10,6 @@ public final class JsonTest {
         TestSupport.equal("José", parsed.get("name"));
         TestSupport.equal(true, parsed.get("active"));
         TestSupport.equal(2, ((List<?>) parsed.get("items")).size());
+        TestSupport.equal("ok", Json.object("\uFEFF{\"status\":\"ok\"}").get("status"));
     }
 }
