@@ -17,6 +17,13 @@ CLI única e dois backends HTTP.
 10. `migrate` — migra dados entre bancos JDBC heterogêneos.
 11. `itam-server` — backend de gestão de ativos de TI.
 12. `intellij-plugin/` — plugin IntelliJ que integra ações da suíte.
+13. `dependency-audit`/`sbom` — inventaria Maven/Gradle e gera CycloneDX/SPDX.
+14. `quality` — métricas, problemas de qualidade e ciclos entre pacotes.
+15. `security-scan` — segredos, configurações inseguras e certificados.
+16. `spring-audit` — catálogo de componentes/endpoints e políticas Spring.
+17. `modernize` — plano de modernização para Java/Jakarta/JUnit.
+18. `jvm-diagnose` — análise offline de thread dumps, GC e logs.
+19. `portal-server` — painel web local, responsivo e instalável.
 
 As versões corporativas dos backends em Spring Boot, com JPA, Flyway, H2,
 Actuator e testes MockMvc, ficam em `spring-backends/`.
@@ -45,7 +52,89 @@ Actuator e testes MockMvc, ficam em `spring-backends/`.
 ./swissknife.cmd debt ./src
 ./swissknife.cmd vuln-server 8081 ./data/vulnerabilities.db
 ./swissknife.cmd itam-server 8082 ./data/assets.db
+./swissknife.cmd dependency-audit . --format json
+./swissknife.cmd quality src --format sarif --output build/quality.sarif
+./swissknife.cmd security-scan . --format sarif --output build/security.sarif
+./swissknife.cmd spring-audit . --format html --output build/spring.html
+./swissknife.cmd modernize . --target 21
+./swissknife.cmd jvm-diagnose ./logs/gc.log
+./swissknife.cmd portal-server 8080
+./swissknife.cmd docs-site ./src/main/java ./build/docs-site
+./swissknife.cmd docs-diff ./versao-anterior/src ./src
+./swissknife.cmd deps-export . ./build/architecture.html html
+./swissknife.cmd schema-script desired.sql current.sql migration.sql flyway
+./swissknife.cmd gatling-project examples/load/orders.json ./build/load-project
+./swissknife.cmd migrate-config examples/migration/migration.properties
+./swissknife.cmd integrate examples/integrations/github.properties examples/integrations/finding.json
+./swissknife.cmd test-audit .
+./swissknife.cmd config-audit ./config/dev ./config/prod
+./swissknife.cmd release-readiness .
+./swissknife.cmd vuln-import ./data/vulnerabilities.db ./results.sarif sarif
+./swissknife.cmd vuln-report ./data/vulnerabilities.db
+./swissknife.cmd itam-import ./data/assets.db ./inventory.csv
+./swissknife.cmd itam-transition ./data/assets.db <id> checkout usuario
+./swissknife.cmd store-admin ./data/assets.db backup ./backup/assets.db
+./swissknife.cmd ai-assist examples/ai/local-ollama.properties explain ./report.json
 ```
+
+## Plataforma da CLI
+
+A configuração é mesclada nesta ordem: `~/.swissknife.yml`, configuração do
+projeto, `--config`, perfil, variáveis `SWISSKNIFE_*` e argumentos `--set`.
+
+```powershell
+./swissknife.cmd init
+./swissknife.cmd doctor --format text
+./swissknife.cmd completion powershell
+./swissknife.cmd pipeline ./pipeline.txt --format html --output ./report.html
+```
+
+Formatos disponíveis: JSON, texto, YAML, CSV, XML, HTML, Markdown, SARIF e
+JUnit XML. `--output -` mantém a saída no terminal e `--quiet` a suprime.
+
+Os códigos de saída são `0` para execução limpa, `2` quando há alertas e `3`
+quando uma política reprova o resultado. Use `--no-fail` para análises
+exploratórias. O cache incremental fica em `.swissknife/cache`; consulte com
+`cache-status` e limpe apenas seus artefatos com `cache-clear`.
+
+Um pipeline possui um comando por linha:
+
+```text
+quality src/main/java
+security-scan .
+dependency-audit .
+spring-audit spring-backends
+```
+
+## Recursos avançados
+
+- `docs` usa a AST oficial do JDK e documenta tipos, membros, herança,
+  annotations, exceções e cobertura documental.
+- `schema-diff` compara colunas, defaults, PK/FK/UNIQUE/CHECK, índices,
+  sequences e views, incluindo rollback.
+- `deps-export` descobre Maven, Gradle, Docker, Kubernetes, Feign, HTTP, Kafka
+  e RabbitMQ e calcula ciclos, impacto e caminho crítico.
+- `debt` aceita `.swissknife-debt.properties` com marcadores, extensões,
+  responsáveis, tickets, prazos e quality gates.
+- `migrate-config` fornece dry-run, transformações, checkpoints, checksum,
+  rejeitados e políticas de conflito.
+- `integrate` opera em dry-run por padrão. Acrescente `--send` somente após
+  revisar URL, headers e preview redigido.
+- `ai-assist` também opera em dry-run. O envio exige simultaneamente `--send`
+  e `--consent`; segredos são redigidos antes da montagem da requisição.
+- `vuln-import` entende SARIF, CycloneDX, Semgrep e JSON genérico, deduplicando
+  findings por fingerprint.
+- `store-admin` mantém trilha de auditoria encadeada por SHA-256 e valida
+  backups antes do restore.
+- O portal executa uma allowlist de análises em jobs assíncronos, com
+  histórico persistente, cancelamento, métricas e autenticação Bearer.
+
+## Distribuição
+
+- Windows: `./install.ps1`
+- Linux/macOS: `chmod +x build.sh install.sh && ./install.sh`
+- Docker: `docker build -t swissknife-javanist .`
+- GitHub Actions: `uses: sua-organizacao/SwissKnifeJavanist@v1`
 
 As APIs respondem JSON. Em ambos os servidores, `GET /health` fornece o estado
 do processo. Consulte [docs/API.md](docs/API.md) para as rotas.
