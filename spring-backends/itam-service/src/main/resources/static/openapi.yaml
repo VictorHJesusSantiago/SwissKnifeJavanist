@@ -1,0 +1,34 @@
+openapi: 3.1.0
+info: {title: SwissKnife ITAM API, version: 1.0.0}
+servers: [{url: /}]
+paths:
+  /api/v1/assets:
+    get: {summary: Lista ativos, responses: {'200': {description: OK}}}
+    post:
+      summary: Cadastra ativo
+      security: [{bearerAuth: []}]
+      requestBody: {required: true, content: {application/json: {schema: {$ref: '#/components/schemas/AssetRequest'}}}}
+      responses: {'201': {description: Criado}, '400': {description: Inválido}}
+  /api/v1/assets/{id}:
+    parameters: [{name: id, in: path, required: true, schema: {type: string, format: uuid}}]
+    get: {summary: Consulta ativo, responses: {'200': {description: OK}, '404': {description: Ausente}}}
+    put: {summary: Atualiza ativo, responses: {'200': {description: OK}}}
+    delete: {summary: Exclui ativo, responses: {'204': {description: Excluído}}}
+  /api/v1/inventory:
+    get: {summary: Indicadores de inventário, responses: {'200': {description: OK}}}
+components:
+  securitySchemes:
+    bearerAuth: {type: http, scheme: bearer}
+  schemas:
+    AssetRequest:
+      type: object
+      required: [tag, name, type]
+      properties:
+        tag: {type: string}
+        name: {type: string}
+        type: {type: string, enum: [COMPUTER, MOBILE, NETWORK, SERVER, SOFTWARE, OTHER]}
+        status: {type: string, enum: [IN_STOCK, IN_USE, MAINTENANCE, RETIRED, LOST]}
+        serialNumber: {type: string}
+        assignedTo: {type: string}
+        purchaseValue: {type: number, minimum: 0}
+        purchaseDate: {type: string, format: date}
