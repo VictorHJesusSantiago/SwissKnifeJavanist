@@ -1,0 +1,6 @@
+{
+  "title": "Vulnerabilidade crítica no payments-api",
+  "description": "Atualize a dependência afetada e execute novamente o scanner.",
+  "severity": "CRITICAL",
+  "kind": "VULNERABILITY"
+}
