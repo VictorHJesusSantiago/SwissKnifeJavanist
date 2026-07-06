@@ -13,6 +13,9 @@ flowchart LR
   CORE --> FILES[Geradores e arquivos]
   CORE --> JDBC[Migração JDBC]
   CORE --> HTTP[Contract testing]
+  CORE --> GOV[Qualidade / Segurança / SBOM]
+  CORE --> JVM[Diagnóstico JVM]
+  CORE --> INTEGRATIONS[Adaptadores externos]
   HTTP --> EXT[Serviços externos]
   VULN[Vulnerability API] --> VDB[(JSON store)]
   ITAM[ITAM API] --> IDB[(JSON store)]
@@ -25,6 +28,10 @@ flowchart LR
 - Os servidores escutam somente no loopback e aceitam autenticação por token.
 - A migração usa apenas JDBC, podendo receber qualquer driver no classpath.
 - O plugin IntelliJ é um projeto isolado, pois depende do SDK da JetBrains.
+- A documentação Java usa `JavacTask`/`DocTrees`, evitando parser por regex.
+- Análises puras usam cache por fingerprint de comando, tamanho e data dos
+  arquivos de entrada.
+- Integrações externas são adapters opt-in e executam dry-run por padrão.
 
 ## Limites conscientes
 
