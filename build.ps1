@@ -8,7 +8,7 @@ if (-not $sources) { throw "Nenhum fonte Java encontrado." }
 & javac --release 21 -encoding UTF-8 -d $out $sources
 if ($LASTEXITCODE -ne 0) { throw "Falha de compilação." }
 $manifest = Join-Path $root "build/MANIFEST.MF"
-Set-Content -Encoding ASCII $manifest "Main-Class: dev.swissknife.Main`n"
+Set-Content -Encoding ASCII $manifest "Main-Class: dev.swissknife.Main`nImplementation-Version: 2.0.0`n"
 & java -m jdk.jartool/sun.tools.jar.Main --create --file (Join-Path $root "build/swissknife.jar") --manifest $manifest -C $out .
 if ($LASTEXITCODE -ne 0) { throw "Falha ao criar JAR." }
 Write-Host "Criado build/swissknife.jar"
