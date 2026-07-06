@@ -13,6 +13,19 @@
             <action id="SwissKnife.ScanDebt"
                     class="dev.swissknife.intellij.ScanDebtAction"
                     text="Analisar débito técnico"/>
+            <separator/>
+            <action id="SwissKnife.Quality"
+                    class="dev.swissknife.intellij.QualityAction"
+                    text="Analisar qualidade Java"/>
+            <action id="SwissKnife.Security"
+                    class="dev.swissknife.intellij.SecurityScanAction"
+                    text="Verificar segurança"/>
+            <action id="SwissKnife.Architecture"
+                    class="dev.swissknife.intellij.ArchitectureAction"
+                    text="Gerar mapa arquitetural"/>
+            <action id="SwissKnife.SpringAudit"
+                    class="dev.swissknife.intellij.SpringAuditAction"
+                    text="Auditar Spring Boot"/>
         </group>
     </actions>
 </idea-plugin>
