@@ -16,27 +16,94 @@ public final class DataAnonymizer {
     private final Map<String, String> consistent = new HashMap<>();
 
     public Report anonymize(Path input, Path policyFile, Path output) throws IOException {
-        var policy = new Properties();
-        try (var reader = Files.newBufferedReader(policyFile)) { policy.load(reader); }
+        var policy = loadPolicy(policyFile);
         activePolicy = policy;
         validatePolicy(policy);
-        var lines = Files.readAllLines(input, StandardCharsets.UTF_8);
+        char delimiter = delimiter(policy);
+        var lines = Csv.splitRecords(Files.readString(input, StandardCharsets.UTF_8));
         if (lines.isEmpty()) throw new IllegalArgumentException("CSV vazio");
-        var headers = Csv.parseLine(lines.getFirst());
-        var out = new ArrayList<String>();
-        out.add(Csv.line(headers));
+        var headers = Csv.parseLine(lines.getFirst(), delimiter);
+        List<List<String>> rows = new ArrayList<>();
         for (int row = 1; row < lines.size(); row++) {
-            var cells = Csv.parseLine(lines.get(row));
+            if (lines.get(row).isBlank()) continue;
+            var cells = Csv.parseLine(lines.get(row), delimiter);
             for (int col = 0; col < Math.min(headers.size(), cells.size()); col++) {
                 var strategy = policy.getProperty(headers.get(col), "keep");
                 cells.set(col, transform(strategy, cells.get(col), row));
             }
-            out.add(Csv.line(cells));
+            rows.add(cells);
         }
+        applyShuffle(headers, rows, policy);
+        var out = new ArrayList<String>();
+        out.add(Csv.line(headers, delimiter));
+        rows.forEach(cells -> out.add(Csv.line(cells, delimiter)));
         var parent = output.toAbsolutePath().getParent();
         if (parent != null) Files.createDirectories(parent);
         Files.write(output, out, StandardCharsets.UTF_8);
-        return new Report(lines.size() - 1, headers.size(), output, detectHeaders(headers), policyVersion(policy));
+        return new Report(rows.size(), headers.size(), output, detectHeaders(headers), policyVersion(policy),
+            uniquenessWarnings(headers, rows, policy));
+    }
+
+    /** Gera uma prévia (amostra) das transformações sem gravar o arquivo de saída. */
+    public List<List<String>> preview(Path input, Path policyFile, int sampleRows) throws IOException {
+        var policy = loadPolicy(policyFile);
+        activePolicy = policy;
+        validatePolicy(policy);
+        char delimiter = delimiter(policy);
+        var lines = Csv.splitRecords(Files.readString(input, StandardCharsets.UTF_8));
+        if (lines.isEmpty()) return List.of();
+        var headers = Csv.parseLine(lines.getFirst(), delimiter);
+        List<List<String>> result = new ArrayList<>();
+        result.add(headers);
+        for (int row = 1; row < lines.size() && result.size() <= sampleRows; row++) {
+            if (lines.get(row).isBlank()) continue;
+            var cells = Csv.parseLine(lines.get(row), delimiter);
+            for (int col = 0; col < Math.min(headers.size(), cells.size()); col++) {
+                var strategy = policy.getProperty(headers.get(col), "keep");
+                cells.set(col, transform(strategy, cells.get(col), row));
+            }
+            result.add(cells);
+        }
+        return result;
+    }
+
+    private Properties loadPolicy(Path policyFile) throws IOException {
+        var policy = new Properties();
+        try (var reader = Files.newBufferedReader(policyFile)) { policy.load(reader); }
+        return policy;
+    }
+
+    private char delimiter(Properties policy) {
+        String configured = policy.getProperty("_delimiter", policy.getProperty("_format", ",").equalsIgnoreCase("tsv") ? "\t" : ",");
+        if (configured.equalsIgnoreCase("tab") || configured.equals("\\t")) return '\t';
+        return configured.isEmpty() ? ',' : configured.charAt(0);
+    }
+
+    private void applyShuffle(List<String> headers, List<List<String>> rows, Properties policy) {
+        for (int col = 0; col < headers.size(); col++) {
+            if (!"shuffle".equalsIgnoreCase(policy.getProperty(headers.get(col), ""))) continue;
+            List<String> values = new ArrayList<>();
+            for (List<String> row : rows) if (col < row.size()) values.add(row.get(col));
+            Collections.shuffle(values, new Random());
+            int index = 0;
+            for (List<String> row : rows) if (col < row.size()) row.set(col, values.get(index++));
+        }
+    }
+
+    private List<String> uniquenessWarnings(List<String> headers, List<List<String>> rows, Properties policy) {
+        List<String> warnings = new ArrayList<>();
+        Set<String> uniquenessStrategies = Set.of("hash", "uuid", "email-consistent", "hmac");
+        for (int col = 0; col < headers.size(); col++) {
+            String strategy = policy.getProperty(headers.get(col), "keep").toLowerCase(Locale.ROOT);
+            if (!uniquenessStrategies.contains(strategy)) continue;
+            Set<String> values = new HashSet<>();
+            int total = 0;
+            for (List<String> row : rows) if (col < row.size() && !row.get(col).isBlank()) { values.add(row.get(col)); total++; }
+            if (total > 0 && values.size() < total)
+                warnings.add("Coluna '" + headers.get(col) + "': " + (total - values.size()) +
+                    " colisão(ões) possível(is) após anonimização com estratégia " + strategy);
+        }
+        return warnings;
     }
 
     public Report anonymizeJson(Path input, Path policyFile, Path output) throws IOException {
@@ -50,7 +117,7 @@ public final class DataAnonymizer {
         var parent = output.toAbsolutePath().getParent();
         if (parent != null) Files.createDirectories(parent);
         Files.writeString(output, Json.stringify(transformed), StandardCharsets.UTF_8);
-        return new Report(counter.rows, counter.fields, output, counter.detected, policyVersion(policy));
+        return new Report(counter.rows, counter.fields, output, counter.detected, policyVersion(policy), List.of());
     }
 
     public DetectionReport detect(Path input) throws IOException {
@@ -81,11 +148,14 @@ public final class DataAnonymizer {
         if (lower.startsWith("keep-first:")) return keepFirst(value, integerArg(strategy));
         if (lower.startsWith("constant:")) return strategy.substring(strategy.indexOf(':') + 1);
         if (lower.startsWith("regex:")) return regex(value, strategy.substring(strategy.indexOf(':') + 1));
+        if (lower.startsWith("age-bucket:")) return ageBucket(value, integerArg(strategy));
+        if (lower.equals("shuffle")) return value;
         return switch (lower) {
             case "keep" -> value;
             case "null" -> "";
             case "mask" -> value.length() <= 2 ? "**" : value.charAt(0) + "*".repeat(value.length() - 2) + value.charAt(value.length() - 1);
             case "hash" -> hash(salt() + value).substring(0, 16);
+            case "hmac" -> hmac(value).substring(0, 16);
             case "email-consistent" -> consistent("email", value,
                 () -> "usuario-" + hash(salt() + value).substring(0, 10) + "@exemplo.test");
             case "email-domain" -> "anon-" + hash(salt() + value).substring(0, 8) +
@@ -125,9 +195,9 @@ public final class DataAnonymizer {
         policy.forEach((key, value) -> {
             String strategy = String.valueOf(value).toLowerCase(Locale.ROOT);
             if (String.valueOf(key).startsWith("_")) return;
-            boolean valid = Set.of("keep","null","mask","hash","email","email-consistent","email-domain",
-                "name","phone","cpf","cnpj","cep","uuid").contains(strategy)
-                || strategy.matches("(date-shift|number-noise|keep-last|keep-first):.+")
+            boolean valid = Set.of("keep","null","mask","hash","hmac","email","email-consistent","email-domain",
+                "name","phone","cpf","cnpj","cep","uuid","shuffle").contains(strategy)
+                || strategy.matches("(date-shift|number-noise|keep-last|keep-first|age-bucket):.+")
                 || strategy.startsWith("constant:") || strategy.startsWith("regex:");
             if (!valid) throw new IllegalArgumentException("Estratégia desconhecida em " + key + ": " + value);
         });
@@ -211,6 +281,24 @@ public final class DataAnonymizer {
             return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(value.getBytes(StandardCharsets.UTF_8)));
         } catch (NoSuchAlgorithmException e) { throw new IllegalStateException(e); }
     }
+    private String hmac(String value) {
+        String keyEnvVar = activePolicy.getProperty("_hmacKeyEnv", "SWISSKNIFE_HMAC_KEY");
+        String key = System.getenv(keyEnvVar);
+        if (key == null || key.isBlank())
+            throw new IllegalArgumentException("Variável de ambiente ausente para HMAC: " + keyEnvVar);
+        try {
+            var mac = javax.crypto.Mac.getInstance("HmacSHA256");
+            mac.init(new javax.crypto.spec.SecretKeySpec(key.getBytes(StandardCharsets.UTF_8), "HmacSHA256"));
+            return HexFormat.of().formatHex(mac.doFinal(value.getBytes(StandardCharsets.UTF_8)));
+        } catch (GeneralSecurityException e) { throw new IllegalStateException(e); }
+    }
+    private String ageBucket(String value, int bucketSize) {
+        try {
+            int age = Integer.parseInt(value.trim());
+            int bucketStart = (age / bucketSize) * bucketSize;
+            return bucketStart + "-" + (bucketStart + bucketSize - 1);
+        } catch (NumberFormatException e) { throw new IllegalArgumentException("Idade inválida para age-bucket: " + value); }
+    }
     private static final class Counter {
         int rows, fields;
         final List<PiiColumn> detected = new ArrayList<>();
@@ -218,5 +306,5 @@ public final class DataAnonymizer {
     public record PiiColumn(String column, String kind, String confidence) {}
     public record DetectionReport(List<PiiColumn> columns, int sampledRows) {}
     public record Report(int rows, int columns, Path output, List<PiiColumn> detectedPii,
-                         String policyVersion) {}
+                         String policyVersion, List<String> uniquenessWarnings) {}
 }
