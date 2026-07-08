@@ -18,10 +18,11 @@ public final class OutputFormatter {
             case "xml" -> "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n" + xml("result", tree, 0);
             case "html" -> html(tree);
             case "markdown", "md" -> "```json\n" + prettyJson(tree, 0) + "\n```\n";
+            case "asciidoc", "adoc" -> asciidoc(tree, 0);
             case "sarif" -> sarif(tree);
             case "junit", "junit-xml" -> junit(tree);
             default -> throw new IllegalArgumentException("Formato desconhecido: " + format +
-                ". Use json, text, yaml, csv, xml, html, markdown, sarif ou junit.");
+                ". Use json, text, yaml, csv, xml, html, markdown, asciidoc, sarif ou junit.");
         };
     }
 
@@ -48,7 +49,75 @@ public final class OutputFormatter {
         return indent + display(value) + "\n";
     }
 
-    private static String yaml(Object value, int depth) { return text(value, depth); }
+    private static String yaml(Object value, int depth) {
+        String indent = "  ".repeat(depth);
+        if (value instanceof Map<?, ?> map) {
+            if (map.isEmpty()) return indent + "{}\n";
+            StringBuilder out = new StringBuilder();
+            map.forEach((key, item) -> {
+                out.append(indent).append(yamlScalar(String.valueOf(key))).append(":");
+                if (scalar(item)) out.append(" ").append(yamlScalar(display(item))).append("\n");
+                else if (item instanceof List<?> list && list.isEmpty()) out.append(" []\n");
+                else if (item instanceof Map<?, ?> nested && nested.isEmpty()) out.append(" {}\n");
+                else out.append("\n").append(yaml(item, depth + 1));
+            });
+            return out.toString();
+        }
+        if (value instanceof List<?> list) {
+            if (list.isEmpty()) return indent + "[]\n";
+            StringBuilder out = new StringBuilder();
+            for (Object item : list) {
+                if (scalar(item)) out.append(indent).append("- ").append(yamlScalar(display(item))).append("\n");
+                else {
+                    String rendered = yaml(item, depth + 1);
+                    out.append(indent).append("- ").append(rendered.stripLeading());
+                }
+            }
+            return out.toString();
+        }
+        return indent + yamlScalar(display(value)) + "\n";
+    }
+
+    private static String yamlScalar(String value) {
+        if (value.isEmpty()) return "\"\"";
+        boolean needsQuote = value.matches("(?i)true|false|null|~|-?\\d+(\\.\\d+)?")
+            || value.startsWith(" ") || value.endsWith(" ")
+            || value.chars().anyMatch(c -> c == ':' || c == '#' || c == '\n' || c == '"' || c == '\'')
+            || value.startsWith("-") || value.startsWith("[") || value.startsWith("{") || value.startsWith("&") || value.startsWith("*");
+        if (!needsQuote) return value;
+        return "\"" + value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n") + "\"";
+    }
+
+    private static String asciidoc(Object value, int depth) {
+        if (value instanceof Map<?, ?> map) {
+            StringBuilder out = new StringBuilder();
+            map.forEach((key, item) -> {
+                if (scalar(item)) out.append("* *").append(key).append(":* ").append(display(item)).append("\n");
+                else {
+                    out.append("* *").append(key).append(":*\n");
+                    out.append(indentBlock(asciidoc(item, depth + 1)));
+                }
+            });
+            return out.toString();
+        }
+        if (value instanceof List<?> list) {
+            StringBuilder out = new StringBuilder();
+            for (Object item : list) {
+                if (scalar(item)) out.append("* ").append(display(item)).append("\n");
+                else out.append(indentBlock(asciidoc(item, depth + 1)));
+            }
+            return out.toString();
+        }
+        return "* " + display(value) + "\n";
+    }
+
+    private static String indentBlock(String block) {
+        StringBuilder out = new StringBuilder();
+        for (String line : block.split("\n", -1)) {
+            if (!line.isEmpty()) out.append("  ").append(line).append("\n");
+        }
+        return out.toString();
+    }
 
     private static String csv(Object value) {
         List<Map<String, Object>> rows = rows(value);
@@ -98,7 +167,7 @@ public final class OutputFormatter {
 
     private static String sarif(Object value) {
         Map<String, Object> run = new LinkedHashMap<>();
-        run.put("tool", Map.of("driver", Map.of("name", "SwissKnife Javanist", "version", "1.0.0")));
+        run.put("tool", Map.of("driver", Map.of("name", "SwissKnife Javanist", "version", Version.current())));
         run.put("results", findings(value));
         return Json.stringify(Map.of("version", "2.1.0",
             "$schema", "https://json.schemastore.org/sarif-2.1.0.json", "runs", List.of(run)));
