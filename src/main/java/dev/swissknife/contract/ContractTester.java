@@ -13,38 +13,68 @@ import java.util.regex.*;
 public final class ContractTester {
     private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(5)).build();
 
-    public Object executeAny(Path contractFile) throws IOException, InterruptedException {
+    public Object executeAny(Path contractFile) throws IOException, InterruptedException, java.util.concurrent.ExecutionException {
         var root = Json.object(Files.readString(contractFile));
         if (root.get("contracts") instanceof List<?> contracts) {
-            List<Result> results = new ArrayList<>();
             Map<String, String> variables = new LinkedHashMap<>();
             if (root.get("variables") instanceof Map<?, ?> map)
                 map.forEach((k, v) -> variables.put(String.valueOf(k), resolve(String.valueOf(v), variables)));
-            for (Object item : contracts) {
-                @SuppressWarnings("unchecked") var contract = (Map<String, Object>) item;
-                results.add(execute(contract, variables));
+            boolean redact = Boolean.TRUE.equals(root.get("redactSensitive"));
+            boolean parallel = Boolean.TRUE.equals(root.get("parallel"));
+            runPhase(root.get("setup"), variables, redact);
+            List<Result> results;
+            if (parallel) {
+                // Execução concorrente: cada contrato roda com sua própria cópia das variáveis capturadas
+                // até aqui (via setup). Extrações feitas por um contrato NÃO ficam visíveis para os outros
+                // nesta rodada — encadeamento (extract/${var}) exige execução sequencial (parallel=false).
+                var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor();
+                List<java.util.concurrent.Future<Result>> futures = new ArrayList<>();
+                for (Object item : contracts) {
+                    @SuppressWarnings("unchecked") var contract = (Map<String, Object>) item;
+                    Map<String, String> snapshot = new LinkedHashMap<>(variables);
+                    futures.add(executor.submit(() -> execute(contract, snapshot, redact)));
+                }
+                results = new ArrayList<>();
+                for (var future : futures) results.add(future.get());
+                executor.shutdown();
+            } else {
+                results = new ArrayList<>();
+                for (Object item : contracts) {
+                    @SuppressWarnings("unchecked") var contract = (Map<String, Object>) item;
+                    results.add(execute(contract, variables, redact));
+                }
             }
+            runPhase(root.get("teardown"), variables, redact);
             return new SuiteResult(results.stream().allMatch(Result::passed), results.size(),
                 results.stream().filter(Result::passed).count(), results);
         }
-        return execute(root, new LinkedHashMap<>());
+        return execute(root, new LinkedHashMap<>(), false);
+    }
+
+    @SuppressWarnings("unchecked")
+    private void runPhase(Object phase, Map<String, String> variables, boolean redact) throws IOException, InterruptedException {
+        if (!(phase instanceof List<?> steps)) return;
+        for (Object item : steps) execute((Map<String, Object>) item, variables, redact);
     }
 
     public Result execute(Path contractFile) throws IOException, InterruptedException {
-        return execute(Json.object(Files.readString(contractFile)), new LinkedHashMap<>());
+        return execute(Json.object(Files.readString(contractFile)), new LinkedHashMap<>(), false);
     }
 
-    private Result execute(Map<String, Object> contract, Map<String, String> variables)
+    private Result execute(Map<String, Object> contract, Map<String, String> variables, boolean redact)
         throws IOException, InterruptedException {
         String method = resolve(text(contract, "method", "GET"), variables);
         String url = resolve(text(contract, "url", null), variables);
         if (url == null) throw new IllegalArgumentException("url é obrigatória");
         url = addQuery(url, contract.get("query"), variables);
         String body = body(contract, variables);
+        String contentType = contract.get("form") != null ? "application/x-www-form-urlencoded"
+            : text(contract, "contentType", "application/json");
         int timeout = number(contract, "timeoutMs", 15_000);
         var builder = HttpRequest.newBuilder(URI.create(url)).timeout(Duration.ofMillis(timeout))
-            .header("Content-Type", text(contract, "contentType", "application/json"));
+            .header("Content-Type", contentType);
         headers(contract.get("headers"), variables).forEach(builder::header);
+        applyCookies(builder, contract.get("cookies"), variables);
         applyAuth(builder, contract, variables);
         var request = builder.method(method, body.isEmpty() ? HttpRequest.BodyPublishers.noBody()
             : HttpRequest.BodyPublishers.ofString(body)).build();
@@ -75,13 +105,121 @@ public final class ContractTester {
                 .matcher(response.body()).find())
             failures.add("Corpo não corresponde à expressão regular esperada");
         validateHeaders(contract.get("expectedHeaders"), response, failures, variables);
+        validateCookies(contract.get("expectedCookies"), response, failures, variables);
         validateJsonPaths(contract.get("jsonPath"), response.body(), failures, variables);
+        if (contract.get("jsonSchema") instanceof Map<?, ?> schema) validateJsonSchema(schema, response.body(), failures);
         int maximum = number(contract, "maxResponseTimeMs", 0);
         if (maximum > 0 && duration > maximum)
             failures.add("Tempo máximo " + maximum + "ms, recebido " + duration + "ms");
+        if (contract.get("snapshot") != null) validateSnapshot(contract, response.body(), failures);
         extract(contract.get("extract"), response.body(), variables);
+        Map<String, List<String>> responseHeaders = redact ? redactHeaders(response.headers().map()) : response.headers().map();
         return new Result(failures.isEmpty(), response.statusCode(), response.body(), failures,
-            duration, response.headers().map(), Instant.now().toString());
+            duration, responseHeaders, Instant.now().toString());
+    }
+
+    /**
+     * Validador mínimo de JSON Schema (subconjunto: type, required, properties, items, enum,
+     * minimum/maximum, minLength/maxLength) — suficiente para contratos de API sem depender de bibliotecas externas.
+     */
+    private void validateJsonSchema(Map<?, ?> schema, String body, List<String> failures) {
+        Object parsed;
+        try { parsed = Json.parse(body); } catch (Exception e) { failures.add("Resposta não é JSON válido para validação de schema"); return; }
+        validateSchemaNode(schema, parsed, "$", failures);
+    }
+    @SuppressWarnings("unchecked")
+    private void validateSchemaNode(Map<?, ?> schema, Object value, String path, List<String> failures) {
+        Object typeDeclared = schema.get("type");
+        if (typeDeclared != null && !matchesType(String.valueOf(typeDeclared), value))
+            failures.add("Schema " + path + ": esperado tipo " + typeDeclared + ", obtido " + jsonTypeName(value));
+        if (schema.get("enum") instanceof List<?> allowed && allowed.stream().noneMatch(v -> Objects.equals(v, value)))
+            failures.add("Schema " + path + ": valor " + value + " não está no enum permitido");
+        if (value instanceof Number number) {
+            if (schema.get("minimum") instanceof Number min && number.doubleValue() < min.doubleValue())
+                failures.add("Schema " + path + ": " + number + " abaixo do mínimo " + min);
+            if (schema.get("maximum") instanceof Number max && number.doubleValue() > max.doubleValue())
+                failures.add("Schema " + path + ": " + number + " acima do máximo " + max);
+        }
+        if (value instanceof String text) {
+            if (schema.get("minLength") instanceof Number min && text.length() < min.intValue())
+                failures.add("Schema " + path + ": comprimento " + text.length() + " abaixo do mínimo " + min);
+            if (schema.get("maxLength") instanceof Number max && text.length() > max.intValue())
+                failures.add("Schema " + path + ": comprimento " + text.length() + " acima do máximo " + max);
+        }
+        if (value instanceof Map<?, ?> object) {
+            if (schema.get("required") instanceof List<?> required)
+                for (Object key : required) if (!object.containsKey(String.valueOf(key)))
+                    failures.add("Schema " + path + ": propriedade obrigatória ausente: " + key);
+            if (schema.get("properties") instanceof Map<?, ?> properties)
+                properties.forEach((key, subSchema) -> {
+                    if (object.containsKey(key) && subSchema instanceof Map<?, ?> sub)
+                        validateSchemaNode(sub, object.get(key), path + "." + key, failures);
+                });
+        }
+        if (value instanceof List<?> list && schema.get("items") instanceof Map<?, ?> itemSchema)
+            for (int i = 0; i < list.size(); i++) validateSchemaNode(itemSchema, list.get(i), path + "[" + i + "]", failures);
+    }
+    private boolean matchesType(String type, Object value) {
+        return switch (type) {
+            case "string" -> value instanceof String;
+            case "number" -> value instanceof Number;
+            case "integer" -> value instanceof Number n && n.doubleValue() == Math.floor(n.doubleValue());
+            case "boolean" -> value instanceof Boolean;
+            case "object" -> value instanceof Map;
+            case "array" -> value instanceof List;
+            case "null" -> value == null;
+            default -> true;
+        };
+    }
+    private String jsonTypeName(Object value) {
+        if (value == null) return "null";
+        if (value instanceof String) return "string";
+        if (value instanceof Number) return "number";
+        if (value instanceof Boolean) return "boolean";
+        if (value instanceof Map) return "object";
+        if (value instanceof List) return "array";
+        return value.getClass().getSimpleName();
+    }
+
+    private void applyCookies(HttpRequest.Builder builder, Object value, Map<String, String> variables) {
+        if (!(value instanceof Map<?, ?> map) || map.isEmpty()) return;
+        String cookieHeader = map.entrySet().stream()
+            .map(e -> e.getKey() + "=" + resolve(String.valueOf(e.getValue()), variables))
+            .reduce((a, b) -> a + "; " + b).orElse("");
+        builder.header("Cookie", cookieHeader);
+    }
+
+    private void validateCookies(Object value, HttpResponse<String> response, List<String> failures,
+                                 Map<String, String> variables) {
+        if (!(value instanceof Map<?, ?> map)) return;
+        List<String> setCookies = response.headers().allValues("Set-Cookie");
+        map.forEach((name, expected) -> {
+            String wanted = resolve(String.valueOf(expected), variables);
+            boolean found = setCookies.stream().anyMatch(c -> c.startsWith(name + "=" + wanted));
+            if (!found) failures.add("Cookie " + name + " esperado com valor " + wanted + " ausente na resposta");
+        });
+    }
+
+    private void validateSnapshot(Map<String, Object> contract, String body, List<String> failures) {
+        try {
+            Path snapshotPath = Path.of(String.valueOf(contract.get("snapshot")));
+            if (!Files.exists(snapshotPath)) {
+                Path parent = snapshotPath.toAbsolutePath().getParent();
+                if (parent != null) Files.createDirectories(parent);
+                Files.writeString(snapshotPath, body);
+                return;
+            }
+            String expected = Files.readString(snapshotPath);
+            if (!expected.equals(body)) failures.add("Resposta diverge do snapshot em " + snapshotPath);
+        } catch (IOException e) { failures.add("Falha ao ler/gravar snapshot: " + e.getMessage()); }
+    }
+
+    private Map<String, List<String>> redactHeaders(Map<String, List<String>> headers) {
+        Set<String> sensitive = Set.of("authorization", "set-cookie", "cookie", "x-api-key");
+        Map<String, List<String>> result = new LinkedHashMap<>();
+        headers.forEach((key, values) -> result.put(key,
+            sensitive.contains(key.toLowerCase(Locale.ROOT)) ? List.of("[REDACTED]") : values));
+        return result;
     }
 
     @SuppressWarnings("unchecked")
@@ -109,6 +247,10 @@ public final class ContractTester {
         return url + (url.contains("?") ? "&" : "?") + query;
     }
     private String body(Map<String, Object> contract, Map<String, String> variables) {
+        if (contract.get("form") instanceof Map<?, ?> form) {
+            return form.entrySet().stream().map(e -> encode(String.valueOf(e.getKey())) + "=" +
+                encode(resolve(String.valueOf(e.getValue()), variables))).reduce((a, b) -> a + "&" + b).orElse("");
+        }
         Object body = contract.get("body");
         if (body == null) return "";
         return resolve(body instanceof String ? (String) body : Json.stringify(body), variables);
