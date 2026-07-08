@@ -55,8 +55,31 @@ public final class JvmDiagnostics {
         while (matcher.find()) exceptions.merge(matcher.group(1), 1, Integer::sum);
         long warnings = content.lines().filter(l -> l.matches("(?i).*\\bWARN(?:ING)?\\b.*")).count();
         long errors = content.lines().filter(l -> l.matches("(?i).*\\bERROR\\b.*")).count();
+        Map<String, Integer> byTrace = new TreeMap<>();
+        Matcher traceMatcher = Pattern.compile("(?i)\\b(?:traceId|trace-id|correlationId|correlation-id)[=:]\\s*([\\w-]+)").matcher(content);
+        while (traceMatcher.find()) byTrace.merge(traceMatcher.group(1), 1, Integer::sum);
+        Optional<Double> startupSeconds = startupDuration(content);
+        List<String> recommendations = new ArrayList<>(errors > 0 ? List.of("Priorize os grupos de erro mais frequentes.") : List.of());
+        String redacted = redact(sample(content, 2000));
         return new Report("APPLICATION_LOG", Map.of("warnings", warnings, "errors", errors,
-            "exceptionGroups", exceptions), errors > 0 ? List.of("Priorize os grupos de erro mais frequentes.") : List.of());
+            "exceptionGroups", exceptions, "byTraceId", byTrace,
+            "startupSeconds", startupSeconds.orElse(-1.0), "sampleRedacted", redacted), recommendations);
+    }
+
+    private Optional<Double> startupDuration(String content) {
+        Matcher springBoot = Pattern.compile("(?i)started\\s+\\S+\\s+in\\s+([\\d.,]+)\\s*seconds").matcher(content);
+        if (springBoot.find()) return Optional.of(Double.parseDouble(springBoot.group(1).replace(',', '.')));
+        return Optional.empty();
+    }
+    /** Amostra segura para inclusão em relatórios (limitada em tamanho, nunca o log completo). */
+    private String sample(String content, int maxChars) {
+        return content.length() <= maxChars ? content : content.substring(0, maxChars) + "\n… (truncado)";
+    }
+    /** Redige segredos comuns (senha/token/chave) antes de qualquer amostra sair do processo local. */
+    private String redact(String content) {
+        return content
+            .replaceAll("(?i)(password|senha|secret|token|api[_-]?key)\\s*[:=]\\s*\\S+", "$1=[REDACTED]")
+            .replaceAll("(?i)\\bAuthorization:\\s*Bearer\\s+\\S+", "Authorization: Bearer [REDACTED]");
     }
     private Map<String, Integer> stackGroups(String content) {
         Map<String, Integer> groups = new TreeMap<>();
@@ -66,5 +89,49 @@ public final class JvmDiagnostics {
             .limit(20).collect(java.util.stream.Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue,
                 (a,b)->a, LinkedHashMap::new));
     }
+    /** Compara dois relatórios de thread dump (antes/depois de uma implantação, por exemplo). */
+    @SuppressWarnings("unchecked")
+    public ThreadDumpDiff compareThreadDumps(Report before, Report after) {
+        if (!before.type().equals("THREAD_DUMP") || !after.type().equals("THREAD_DUMP"))
+            throw new IllegalArgumentException("compareThreadDumps exige dois relatórios do tipo THREAD_DUMP");
+        Map<String, Integer> beforeStates = (Map<String, Integer>) before.metrics().get("states");
+        Map<String, Integer> afterStates = (Map<String, Integer>) after.metrics().get("states");
+        Map<String, Integer> delta = new TreeMap<>();
+        Set<String> allStates = new TreeSet<>(); allStates.addAll(beforeStates.keySet()); allStates.addAll(afterStates.keySet());
+        allStates.forEach(state -> delta.put(state, afterStates.getOrDefault(state, 0) - beforeStates.getOrDefault(state, 0)));
+        Map<String, Integer> beforeGroups = (Map<String, Integer>) before.metrics().get("stackGroups");
+        Map<String, Integer> afterGroups = (Map<String, Integer>) after.metrics().get("stackGroups");
+        List<String> newHotspots = afterGroups.keySet().stream().filter(k -> !beforeGroups.containsKey(k)).toList();
+        List<String> resolvedHotspots = beforeGroups.keySet().stream().filter(k -> !afterGroups.containsKey(k)).toList();
+        return new ThreadDumpDiff(delta, newHotspots, resolvedHotspots);
+    }
+
+    /** Inventário de processos Java em execução localmente (equivalente simplificado ao jps). */
+    public List<JavaProcess> listJavaProcesses() {
+        return ProcessHandle.allProcesses()
+            .map(handle -> new JavaProcess(handle.pid(), handle.info().command().orElse(""),
+                handle.info().commandLine().orElse(""), handle.info().startInstant().map(Object::toString).orElse("")))
+            .filter(process -> process.command().toLowerCase(Locale.ROOT).contains("java"))
+            .toList();
+    }
+
+    /** Empacota vários arquivos de diagnóstico (dumps, logs, relatórios) em um único ZIP para suporte. */
+    public Path bundle(List<Path> files, Path output) throws IOException {
+        Path parent = output.toAbsolutePath().getParent();
+        if (parent != null) Files.createDirectories(parent);
+        try (var zip = new java.util.zip.ZipOutputStream(Files.newOutputStream(output))) {
+            for (Path file : files) {
+                if (!Files.isRegularFile(file)) continue;
+                zip.putNextEntry(new java.util.zip.ZipEntry(file.getFileName().toString()));
+                zip.write(Files.readAllBytes(file));
+                zip.closeEntry();
+            }
+        }
+        return output;
+    }
+
+    public record ThreadDumpDiff(Map<String, Integer> stateDelta, List<String> newStackHotspots,
+                                 List<String> resolvedStackHotspots) {}
+    public record JavaProcess(long pid, String command, String commandLine, String startedAt) {}
     public record Report(String type, Map<String, Object> metrics, List<String> recommendations) {}
 }
