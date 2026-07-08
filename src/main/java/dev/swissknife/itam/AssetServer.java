@@ -35,18 +35,27 @@ public final class AssetServer {
                 else store.find(id).ifPresentOrElse(v -> send(e, 200, v), () -> send(e, 404, Map.of("error", "Ativo não encontrado")));
             }
             case "POST" -> {
-                var asset = HttpSupport.body(e); validate(asset);
+                HttpSupport.requireScope(e, "write", "admin");
+                String rawBody = HttpSupport.rawBody(e);
+                if (HttpSupport.replayIfIdempotent(e, rawBody)) return;
+                var asset = HttpSupport.bodyOf(rawBody); validate(asset);
                 asset.put("status", asset.getOrDefault("status", "IN_USE"));
                 asset.put("createdAt", Instant.now().toString());
-                HttpSupport.json(e, 201, store.save(asset));
+                var saved = store.save(asset);
+                HttpSupport.rememberIdempotent(e, rawBody, 201, saved);
+                HttpSupport.json(e, 201, saved);
             }
             case "PUT" -> {
+                HttpSupport.requireScope(e, "write", "admin");
                 if (id == null || store.find(id).isEmpty()) { HttpSupport.json(e, 404, Map.of("error", "Ativo não encontrado")); return; }
                 var asset = HttpSupport.body(e); asset.put("id", id); validate(asset);
                 asset.put("updatedAt", Instant.now().toString());
                 HttpSupport.json(e, 200, store.save(asset));
             }
-            case "DELETE" -> HttpSupport.json(e, store.delete(id) ? 200 : 404, Map.of("deleted", id));
+            case "DELETE" -> {
+                HttpSupport.requireScope(e, "write", "admin");
+                HttpSupport.json(e, store.delete(id) ? 200 : 404, Map.of("deleted", id));
+            }
             default -> HttpSupport.json(e, 405, Map.of("error", "Método não permitido"));
         }
     }
