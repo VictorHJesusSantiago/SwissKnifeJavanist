@@ -33,9 +33,7 @@ public final class CliTools {
     }
 
     public static String completion(String shell) {
-        String commands = "help init doctor version cache-status cache-clear completion pipeline docs docs-site docs-diff deps deps-export slow-query slow-query-file slow-query-log schema-diff schema-script " +
-            "anonymize anonymize-json detect-pii contract-test gatling gatling-project debt dependency-audit sbom quality security-scan " +
-            "spring-audit test-audit config-audit release-readiness modernize jvm-diagnose integrate ai-assist vuln-import vuln-transition vuln-report itam-import itam-transition itam-report migrate migrate-plan migrate-config vuln-server itam-server portal-server store-admin";
+        String commands = "help " + String.join(" ", CommandCatalog.names());
         return switch (shell.toLowerCase(Locale.ROOT)) {
             case "bash" -> "_swissknife(){ COMPREPLY=( $(compgen -W '" + commands +
                 "' -- \"${COMP_WORDS[1]}\") ); }; complete -F _swissknife swissknife\n";
