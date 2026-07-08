@@ -16,6 +16,7 @@ public final class DependencyAuditor {
         "(?m)(?:implementation|api|compileOnly|runtimeOnly|testImplementation)\\s*\\(?[\"']" +
         "([^:\"']+):([^:\"']+):([^\"']+)[\"']");
     private static final Pattern REPOSITORY = Pattern.compile("https?://[^\\s\"'<>]+");
+    private static final Pattern LICENSE = Pattern.compile("(?s)<license>\\s*<name>(.*?)</name>");
 
     public Report analyze(Path root, Set<String> allowedLicenses, Set<String> allowedRepositories)
         throws IOException {
@@ -26,11 +27,14 @@ public final class DependencyAuditor {
             return name.equals("pom.xml") || name.equals("build.gradle") ||
                 name.equals("build.gradle.kts") || name.equals("libs.versions.toml");
         });
+        String declaredLicense = "";
         for (Path file : manifests) {
             String content = Files.readString(file);
-            if (file.getFileName().toString().equals("pom.xml"))
-                collect(MAVEN_DEP, content, file, dependencies, "maven");
-            else collect(GRADLE_DEP, content, file, dependencies, "gradle");
+            if (file.getFileName().toString().equals("pom.xml")) {
+                Matcher license = LICENSE.matcher(content);
+                declaredLicense = license.find() ? license.group(1).trim() : "";
+                collect(MAVEN_DEP, content, file, dependencies, "maven", declaredLicense);
+            } else collect(GRADLE_DEP, content, file, dependencies, "gradle", "");
             Matcher repositories = REPOSITORY.matcher(content);
             while (repositories.find()) {
                 String url = repositories.group();
@@ -56,21 +60,57 @@ public final class DependencyAuditor {
                 findings.add(new Finding("UNRESOLVED_VERSION", "LOW", d.file(),
                     "Versão herdada ou não resolvida: " + coordinate,
                     "Execute com o modelo efetivo para fixar a versão no SBOM."));
+            if (d.license().isBlank())
+                findings.add(new Finding("LICENSE_MISSING", "LOW", d.file(),
+                    "Licença não declarada para " + coordinate, "Declare a licença no manifesto ou no catálogo."));
+            else if (!allowedLicenses.isEmpty() && allowedLicenses.stream().noneMatch(d.license()::equalsIgnoreCase))
+                findings.add(new Finding("LICENSE_NOT_ALLOWED", "HIGH", d.file(),
+                    "Licença não permitida (" + d.license() + ") para " + coordinate,
+                    "Substitua a dependência ou adicione a licença à política."));
         });
+        Path catalog = root.resolve("versions-catalog.properties");
+        if (Files.isRegularFile(catalog)) findings.addAll(outdated(dependencies, catalog));
         Map<String, Object> cyclonedx = cyclonedx(dependencies);
         Map<String, Object> spdx = spdx(dependencies);
         return new Report(manifests.stream().map(root::relativize).map(Path::toString).toList(),
             List.copyOf(dependencies), List.copyOf(findings), cyclonedx, spdx);
     }
 
-    private void collect(Pattern pattern, String content, Path file, List<Dependency> out, String manager) {
+    private void collect(Pattern pattern, String content, Path file, List<Dependency> out, String manager, String license) {
         Matcher matcher = pattern.matcher(content);
         while (matcher.find()) {
             String version = matcher.groupCount() >= 3 && matcher.group(3) != null
                 ? matcher.group(3).trim() : "";
             out.add(new Dependency(matcher.group(1).trim(), matcher.group(2).trim(), version,
-                manager, file.toString(), "UNKNOWN"));
+                manager, file.toString(), license));
         }
+    }
+
+    /** Compara versões declaradas com um catálogo local (offline) de versões recomendadas. */
+    private List<Finding> outdated(List<Dependency> dependencies, Path catalog) throws IOException {
+        Properties recommended = new Properties();
+        try (var reader = Files.newBufferedReader(catalog)) { recommended.load(reader); }
+        List<Finding> findings = new ArrayList<>();
+        for (Dependency d : dependencies) {
+            String key = d.group() + ":" + d.name();
+            String latest = recommended.getProperty(key);
+            if (latest != null && !latest.isBlank() && !latest.equals(d.version()) && !d.version().isBlank())
+                findings.add(new Finding("OUTDATED_VERSION", "MEDIUM", d.file(),
+                    key + " está em " + d.version() + ", catálogo recomenda " + latest,
+                    "Atualize para " + latest + " e rode os testes de regressão."));
+        }
+        return findings;
+    }
+
+    /** Gera um catálogo de versões (lockfile) group:name=version a partir do inventário atual. */
+    public String lockfile(Report report) {
+        Map<String, String> resolved = new TreeMap<>();
+        report.dependencies().forEach(d -> {
+            if (!d.version().isBlank()) resolved.put(d.group() + ":" + d.name(), d.version());
+        });
+        StringBuilder out = new StringBuilder("# Catálogo de versões gerado por SwissKnife Javanist\n");
+        resolved.forEach((key, version) -> out.append(key).append("=").append(version).append("\n"));
+        return out.toString();
     }
 
     private Map<String, Object> cyclonedx(List<Dependency> dependencies) {
