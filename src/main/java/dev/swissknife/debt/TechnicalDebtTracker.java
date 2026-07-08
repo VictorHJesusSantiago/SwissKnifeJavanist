@@ -32,7 +32,7 @@ public final class TechnicalDebtTracker {
                 int comment = commentStart(line);
                 if (comment < 0) continue;
                 Matcher match = marker.matcher(line.substring(comment));
-                if (match.find()) items.add(item(root, file, i + 1, match.group(1), match.group(2)));
+                if (match.find()) items.add(enrichWithGitBlame(root, item(root, file, i + 1, match.group(1), match.group(2))));
             }
         }
         items.addAll(architecturalDebt(root));
@@ -41,6 +41,7 @@ public final class TechnicalDebtTracker {
         Map<String, Long> byMarker = count(items, Item::marker);
         Map<String, Long> byModule = count(items, Item::module);
         List<Duplicate> duplicates = duplicates(items);
+        List<NearDuplicate> nearDuplicates = nearDuplicates(items, duplicates);
         long overdue = items.stream().filter(Item::overdue).count();
         long malformed = items.stream().filter(item -> item.description().isBlank() || item.owner().isBlank()).count();
         int score = items.stream().mapToInt(item -> item.severity().weight).sum() +
@@ -55,7 +56,65 @@ public final class TechnicalDebtTracker {
         if (overdue > 0) violations.add(new Violation("OVERDUE", overdue + " item(ns) vencido(s)."));
         double effort = items.stream().mapToDouble(Item::effort).sum();
         return new Report(files.size(), items, score, effort, overdue, malformed, bySeverity,
-            byOwner, byMarker, byModule, duplicates, violations, violations.isEmpty(), LocalDate.now().toString());
+            byOwner, byMarker, byModule, duplicates, nearDuplicates, violations, violations.isEmpty(), LocalDate.now().toString());
+    }
+
+    /** Detecta itens com descrição semelhante (não idêntica) via distância de Levenshtein normalizada. */
+    private List<NearDuplicate> nearDuplicates(List<Item> items, List<Duplicate> exactDuplicates) {
+        Set<String> alreadyExact = exactDuplicates.stream().map(Duplicate::normalizedDescription).collect(java.util.stream.Collectors.toSet());
+        List<Item> candidates = items.stream().filter(item -> !item.description().isBlank()
+            && !alreadyExact.contains(normalize(item.description()))).toList();
+        List<NearDuplicate> result = new ArrayList<>();
+        for (int i = 0; i < candidates.size(); i++)
+            for (int j = i + 1; j < candidates.size(); j++) {
+                String a = normalize(candidates.get(i).description()), b = normalize(candidates.get(j).description());
+                if (a.isBlank() || b.isBlank() || a.equals(b)) continue;
+                double similarity = similarity(a, b);
+                if (similarity >= 0.8) result.add(new NearDuplicate(a, b, similarity, List.of(candidates.get(i), candidates.get(j))));
+            }
+        return result;
+    }
+
+    private double similarity(String a, String b) {
+        int distance = levenshtein(a, b);
+        int maxLength = Math.max(a.length(), b.length());
+        return maxLength == 0 ? 1.0 : 1.0 - (distance / (double) maxLength);
+    }
+
+    private int levenshtein(String a, String b) {
+        int[][] d = new int[a.length() + 1][b.length() + 1];
+        for (int i = 0; i <= a.length(); i++) d[i][0] = i;
+        for (int j = 0; j <= b.length(); j++) d[0][j] = j;
+        for (int i = 1; i <= a.length(); i++)
+            for (int j = 1; j <= b.length(); j++) {
+                int cost = a.charAt(i - 1) == b.charAt(j - 1) ? 0 : 1;
+                d[i][j] = Math.min(Math.min(d[i - 1][j] + 1, d[i][j - 1] + 1), d[i - 1][j - 1] + cost);
+            }
+        return d[a.length()][b.length()];
+    }
+
+    /** Relatório HTML com links clicáveis para arquivo:linha (file://) e destaque de itens vencidos. */
+    public String html(Report report) {
+        StringBuilder rows = new StringBuilder();
+        report.items().forEach(item -> rows.append("<tr class=\"").append(item.overdue() ? "overdue" : "").append("\"><td>")
+            .append("<a href=\"file://").append(escape(item.file())).append("\">").append(escape(item.file()))
+            .append(":").append(item.line()).append("</a></td><td>").append(item.marker()).append("</td><td>")
+            .append(item.severity()).append("</td><td>").append(escape(item.description())).append("</td><td>")
+            .append(item.owner().isBlank() ? "-" : escape(item.owner())).append("</td><td>")
+            .append(item.gitAuthor().isBlank() ? "-" : escape(item.gitAuthor())).append("</td><td>")
+            .append(item.ageDays() >= 0 ? item.ageDays() + "d" : "-").append("</td></tr>"));
+        return """
+            <!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Dívida técnica</title>
+            <style>:root{color-scheme:light dark}body{font:15px system-ui;max-width:1200px;margin:auto;padding:2rem}
+            table{border-collapse:collapse;width:100%%}th,td{padding:.5rem;border-bottom:1px solid #8885;text-align:left}
+            .overdue{color:#c0392b;font-weight:bold}</style></head><body><h1>Dívida técnica</h1>
+            <p>%d itens · score %d · %d vencido(s)</p>
+            <table><thead><tr><th>Local</th><th>Marcador</th><th>Severidade</th><th>Descrição</th><th>Responsável</th><th>Autor (git)</th><th>Idade</th></tr></thead>
+            <tbody>%s</tbody></table></body></html>
+            """.formatted(report.items().size(), report.score(), report.overdue(), rows);
+    }
+    private String escape(String value) {
+        return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace("\"", "&quot;");
     }
 
     public Comparison compare(Report baseline, Report current) {
@@ -85,7 +144,36 @@ public final class TechnicalDebtTracker {
         boolean overdue = due != null && due.isBefore(LocalDate.now());
         String suggestion = suggestion(marker, description);
         return new Item(relative, line, marker.toUpperCase(Locale.ROOT), description, severity,
-            owner, ticket, due == null ? "" : due.toString(), overdue, effort, module, suggestion, "SOURCE");
+            owner, ticket, due == null ? "" : due.toString(), overdue, effort, module, suggestion, "SOURCE", "", "", -1);
+    }
+
+    /**
+     * Enriquece o item com autor original e idade via `git blame`, quando o diretório é um
+     * repositório Git e o binário está disponível. Falha silenciosamente caso contrário.
+     */
+    private Item enrichWithGitBlame(Path root, Item item) {
+        try {
+            Process process = new ProcessBuilder("git", "log", "-1", "--format=%an|%ad", "--date=short",
+                "-L", item.line() + "," + item.line() + ":" + item.file())
+                .directory(root.toFile()).redirectErrorStream(true).start();
+            String raw = new String(process.getInputStream().readAllBytes(), java.nio.charset.StandardCharsets.UTF_8).strip();
+            boolean finished = process.waitFor(5, java.util.concurrent.TimeUnit.SECONDS);
+            if (!finished) process.destroyForcibly();
+            if (!finished || raw.isBlank()) return item;
+            String output = raw.lines().findFirst().orElse("");
+            int separator = output.indexOf('|');
+            if (separator < 0) return item;
+            String author = output.substring(0, separator);
+            String date = output.substring(separator + 1).strip();
+            long ageDays = -1;
+            try { ageDays = java.time.temporal.ChronoUnit.DAYS.between(LocalDate.parse(date), LocalDate.now()); }
+            catch (Exception ignored) {}
+            return new Item(item.file(), item.line(), item.marker(), item.description(), item.severity(),
+                item.owner(), item.ticket(), item.dueDate(), item.overdue(), item.effort(), item.module(),
+                item.suggestion(), item.source(), author, date, ageDays);
+        } catch (Exception ignored) {
+            return item;
+        }
     }
 
     private List<Item> architecturalDebt(Path root) throws IOException {
@@ -104,7 +192,7 @@ public final class TechnicalDebtTracker {
             double effort = map.get("effort") instanceof Number n ? n.doubleValue() : 3;
             result.add(new Item(".swissknife/architectural-debt.json", line++, "ARCHITECTURE", description,
                 Severity.valueOf(severityValue.toUpperCase(Locale.ROOT)), owner, ticket, "", false,
-                effort, "architecture", suggestion("ARCHITECTURE", description), "ARCHITECTURE"));
+                effort, "architecture", suggestion("ARCHITECTURE", description), "ARCHITECTURE", "", "", -1));
         }
         return result;
     }
@@ -186,13 +274,16 @@ public final class TechnicalDebtTracker {
                          boolean requireOwner, boolean requireTicket, int maxScore) {}
     public record Item(String file, int line, String marker, String description, Severity severity,
                        String owner, String ticket, String dueDate, boolean overdue, double effort,
-                       String module, String suggestion, String source) {}
+                       String module, String suggestion, String source,
+                       String gitAuthor, String lastModified, long ageDays) {}
     public record Duplicate(String normalizedDescription, List<Item> items) {}
+    public record NearDuplicate(String descriptionA, String descriptionB, double similarity, List<Item> items) {}
     public record Violation(String kind, String description) {}
     public record Report(int filesScanned, List<Item> items, int score, double estimatedEffort,
                          long overdue, long malformed, Map<String, Long> bySeverity,
                          Map<String, Long> byOwner, Map<String, Long> byMarker,
                          Map<String, Long> byModule, List<Duplicate> duplicates,
+                         List<NearDuplicate> nearDuplicates,
                          List<Violation> violations, boolean passed, String generatedAt) {}
     public record Comparison(int scoreDelta, List<Item> added, List<Item> resolved, boolean passed) {}
 }
