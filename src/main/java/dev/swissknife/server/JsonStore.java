@@ -157,15 +157,26 @@ public final class JsonStore {
             lastAuditHash=String.valueOf(Json.object(lines.get(i)).getOrDefault("hash","GENESIS")); return;
         }
     }
+    private static final long AUDIT_ROTATION_BYTES = Long.parseLong(
+        System.getenv().getOrDefault("SWISSKNIFE_AUDIT_ROTATION_BYTES", "10485760"));
+
     private void audit(String action, String id, Map<String, Object> record) throws IOException {
         Map<String,Object> event=new LinkedHashMap<>();
         event.put("timestamp",Instant.now().toString());event.put("action",action);event.put("id",id);
         event.put("recordHash",checksum(Json.stringify(record)));event.put("previousHash",lastAuditHash);
         String hash=checksum(lastAuditHash+Json.stringify(event));event.put("hash",hash);
         Path parent=auditFile.toAbsolutePath().getParent();if(parent!=null)Files.createDirectories(parent);
+        rotateAuditIfNeeded();
         Files.writeString(auditFile,Json.stringify(event)+System.lineSeparator(),StandardCharsets.UTF_8,
             StandardOpenOption.CREATE,StandardOpenOption.APPEND);
         lastAuditHash=hash;
+    }
+    /** Rotaciona o log de auditoria quando excede o limite configurado, preservando a cadeia de hashes no arquivo arquivado. */
+    private void rotateAuditIfNeeded() throws IOException {
+        if (!Files.isRegularFile(auditFile) || Files.size(auditFile) < AUDIT_ROTATION_BYTES) return;
+        Path archived = auditFile.resolveSibling(auditFile.getFileName() + "." +
+            Instant.now().toString().replace(":", "-") + ".archive");
+        Files.move(auditFile, archived, StandardCopyOption.REPLACE_EXISTING);
     }
     private boolean verifyAudit(List<String> errors) {
         if (!Files.isRegularFile(auditFile)) return true;
