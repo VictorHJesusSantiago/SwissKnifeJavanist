@@ -7,6 +7,7 @@ public final class AllTests {
         Map<String, CheckedRunnable> tests = new LinkedHashMap<>();
         tests.put("JsonTest", JsonTest::run);
         tests.put("AnalyzerTest", AnalyzerTest::run);
+        tests.put("ExplainPlanTest", ExplainPlanTest::run);
         tests.put("SchemaTest", SchemaTest::run);
         tests.put("DocumentationTest", DocumentationTest::run);
         tests.put("DependencyTest", DependencyTest::run);
@@ -17,6 +18,7 @@ public final class AllTests {
         tests.put("GovernanceTest", GovernanceTest::run);
         tests.put("AdvancedFeaturesTest", AdvancedFeaturesTest::run);
         tests.put("FunctionalIntegrationTest", FunctionalIntegrationTest::run);
+        tests.put("SessionFeaturesTest", SessionFeaturesTest::run);
         int passed = 0;
         for (var test : tests.entrySet()) {
             try {
