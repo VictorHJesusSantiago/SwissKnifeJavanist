@@ -17,6 +17,17 @@ public final class SlowQueryAnalyzer {
         collect(JOIN, sql, columns);
         collect(ORDER, sql, columns);
         columns = new LinkedHashSet<>(columns.stream().map(this::unqualify).toList());
+        // Refina tabela/colunas/joins usando o parser SQL real (tokenizer + AST) quando a query é um SELECT
+        // reconhecível; a heurística por regex acima permanece como fallback para DML/DDL e queries malformadas.
+        SqlParser.SelectStatement parsed = tryParseSelect(sql);
+        if (parsed != null) {
+            if (!parsed.table().isBlank()) table = parsed.table();
+            LinkedHashSet<String> structural = new LinkedHashSet<>();
+            structural.addAll(parsed.whereColumns());
+            parsed.joins().forEach(j -> structural.addAll(j.onColumns()));
+            structural.addAll(parsed.orderByColumns());
+            if (!structural.isEmpty()) columns = structural;
+        }
         List<String> warnings = new ArrayList<>();
         if (Pattern.compile("(?i)select\\s+\\*").matcher(sql).find()) warnings.add("Evite SELECT *; leia apenas as colunas necessárias.");
         if (!Pattern.compile("(?i)\\bwhere\\b").matcher(sql).find()) warnings.add("Query sem WHERE pode realizar varredura completa.");
@@ -40,6 +51,12 @@ public final class SlowQueryAnalyzer {
             warnings.add("Agregação sem filtro pode processar toda a tabela.");
         if (Pattern.compile("(?i)\\bunion\\b(?!\\s+all)").matcher(sql).find())
             warnings.add("UNION elimina duplicatas e exige ordenação; use UNION ALL quando possível.");
+        int joinCount = parsed != null ? parsed.joinCount() : countMatches(Pattern.compile("(?i)\\bjoin\\b"), sql);
+        if (joinCount > 3) warnings.add("Query com " + joinCount + " joins; avalie desnormalização ou views materializadas.");
+        boolean windowFunction = parsed != null ? parsed.hasWindowFunction() : Pattern.compile("(?i)\\bover\\s*\\(").matcher(sql).find();
+        if (windowFunction) warnings.add("Função de janela (OVER) detectada; confirme índice de particionamento/ordenação.");
+        boolean destructiveWithoutFilter = Pattern.compile("(?i)^\\s*(drop|truncate)\\b").matcher(sql).find();
+        if (destructiveWithoutFilter) warnings.add("Comando destrutivo (DROP/TRUNCATE) detectado; bloqueie em pipelines automatizados.");
         List<String> rewrites = new ArrayList<>();
         if (warnings.stream().anyMatch(w -> w.contains("SELECT *")))
             rewrites.add("Substitua * pela lista explícita de colunas.");
@@ -51,15 +68,24 @@ public final class SlowQueryAnalyzer {
             table.replaceAll("\\W", "_") + "_" + String.join("_", columns) + " ON " + table +
             " (" + String.join(", ", columns) + ");");
         int score = Math.min(100, warnings.size() * 20 + (columns.isEmpty() ? 15 : 0));
+        boolean blocksCi = warnings.stream().anyMatch(w -> w.contains("DROP/TRUNCATE") || w.contains("DML destrutivo"));
         return new Analysis(table, List.copyOf(columns), indexes, warnings, score,
-            List.copyOf(rewrites), classify(sql));
+            List.copyOf(rewrites), classify(sql), joinCount, windowFunction, blocksCi, parsed != null);
+    }
+
+    /** Tenta o parser SQL real (tokenizer + AST); retorna null silenciosamente para DML/DDL ou queries que o parser não reconhece. */
+    private SqlParser.SelectStatement tryParseSelect(String sql) {
+        if (!Pattern.compile("(?i)^\\s*(with\\b.*)?\\bselect\\b").matcher(sql).find()) return null;
+        try { return SqlParser.parseSelect(sql); } catch (Exception notParseable) { return null; }
     }
 
     public BatchAnalysis analyzeBatch(String content) {
         List<String> statements = splitStatements(content);
         List<Analysis> analyses = statements.stream().filter(s -> !s.isBlank()).map(this::analyze).toList();
+        List<Analysis> ranked = analyses.stream()
+            .sorted(Comparator.comparingInt(Analysis::riskScore).reversed()).limit(5).toList();
         return new BatchAnalysis(analyses.size(), analyses.stream().mapToInt(Analysis::riskScore).max().orElse(0),
-            analyses.stream().mapToInt(Analysis::riskScore).sum() / Math.max(1, analyses.size()), analyses);
+            analyses.stream().mapToInt(Analysis::riskScore).sum() / Math.max(1, analyses.size()), analyses, ranked);
     }
 
     public BatchAnalysis analyzeLog(String log) {
@@ -68,7 +94,62 @@ public final class SlowQueryAnalyzer {
             "((?:select|insert|update|delete|with)\\b[^\\r\\n;]*(?:;)?)");
         Matcher matcher = sql.matcher(log);
         while (matcher.find()) queries.add(matcher.group(1));
-        return analyzeBatch(String.join(";\n", queries));
+        BatchAnalysis batch = analyzeBatch(String.join(";\n", queries));
+        List<String> nPlusOne = detectNPlusOne(queries);
+        return nPlusOne.isEmpty() ? batch : new BatchAnalysis(batch.statements(), batch.maximumRisk(),
+            batch.averageRisk(), batch.analyses(), batch.mostProblematic(), nPlusOne);
+    }
+
+    /** Detecta padrão N+1: a mesma "forma" de query (literais normalizados) repetida muitas vezes. */
+    private List<String> detectNPlusOne(List<String> queries) {
+        Map<String, Integer> shapes = new LinkedHashMap<>();
+        for (String query : queries) {
+            String shape = query.toLowerCase(Locale.ROOT)
+                .replaceAll("'[^']*'", "?").replaceAll("\\b\\d+\\b", "?").replaceAll("\\s+", " ").strip();
+            shapes.merge(shape, 1, Integer::sum);
+        }
+        List<String> findings = new ArrayList<>();
+        shapes.forEach((shape, count) -> {
+            if (count >= 5) findings.add("Possível N+1: a mesma query executada " + count +
+                " vezes (\"" + (shape.length() > 80 ? shape.substring(0, 80) + "…" : shape) + "\")");
+        });
+        return findings;
+    }
+
+    /** Gera um script SQL com os índices sugeridos pela análise em lote. */
+    public String indexMigrationScript(BatchAnalysis batch) {
+        LinkedHashSet<String> statements = new LinkedHashSet<>();
+        batch.analyses().forEach(a -> statements.addAll(a.suggestedIndexes()));
+        StringBuilder out = new StringBuilder("-- Índices sugeridos por SwissKnife Javanist\n");
+        statements.forEach(s -> out.append(s).append("\n"));
+        return out.toString();
+    }
+
+    /** Gera um relatório HTML consolidado da análise em lote. */
+    public String html(BatchAnalysis batch) {
+        StringBuilder rows = new StringBuilder();
+        batch.analyses().forEach(a -> rows.append("<tr><td>").append(a.table()).append("</td><td>")
+            .append(a.statementType()).append("</td><td>").append(a.riskScore()).append("</td><td>")
+            .append(String.join("; ", a.warnings())).append("</td></tr>"));
+        StringBuilder nplus1 = new StringBuilder();
+        batch.nPlusOneFindings().forEach(f -> nplus1.append("<li>").append(f).append("</li>"));
+        return """
+            <!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Relatório de queries lentas</title>
+            <style>:root{color-scheme:light dark}body{font:15px system-ui;max-width:1100px;margin:auto;padding:2rem}
+            table{border-collapse:collapse;width:100%%}th,td{padding:.5rem;border-bottom:1px solid #8885;text-align:left}
+            </style></head><body><h1>Relatório de queries lentas</h1>
+            <p>%d statements · risco máximo %d · risco médio %d</p>
+            <ul>%s</ul>
+            <table><thead><tr><th>Tabela</th><th>Tipo</th><th>Risco</th><th>Alertas</th></tr></thead><tbody>%s</tbody></table>
+            </body></html>
+            """.formatted(batch.statements(), batch.maximumRisk(), batch.averageRisk(), nplus1, rows);
+    }
+
+    private int countMatches(Pattern pattern, String text) {
+        Matcher matcher = pattern.matcher(text);
+        int count = 0;
+        while (matcher.find()) count++;
+        return count;
     }
 
     private List<String> splitStatements(String content) {
@@ -96,7 +177,14 @@ public final class SlowQueryAnalyzer {
     private String unqualify(String value) { int dot = value.lastIndexOf('.'); return dot < 0 ? value : value.substring(dot + 1); }
     public record Analysis(String table, List<String> columns, List<String> suggestedIndexes,
                            List<String> warnings, int riskScore, List<String> rewrites,
-                           String statementType) {}
+                           String statementType, int joinCount, boolean windowFunction, boolean blocksCi,
+                           boolean parsedByRealParser) {}
     public record BatchAnalysis(int statements, int maximumRisk, int averageRisk,
-                                List<Analysis> analyses) {}
+                                List<Analysis> analyses, List<Analysis> mostProblematic,
+                                List<String> nPlusOneFindings) {
+        public BatchAnalysis(int statements, int maximumRisk, int averageRisk,
+                             List<Analysis> analyses, List<Analysis> mostProblematic) {
+            this(statements, maximumRisk, averageRisk, analyses, mostProblematic, List.of());
+        }
+    }
 }
