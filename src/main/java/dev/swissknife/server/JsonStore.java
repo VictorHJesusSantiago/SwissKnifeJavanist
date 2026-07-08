@@ -39,6 +39,13 @@ public final class JsonStore {
         finally { lock.readLock().unlock(); }
     }
 
+    /** Tamanho da coleção sem copiar cada registro — use em vez de {@code all().size()} quando só a contagem importa. */
+    public int count() {
+        lock.readLock().lock();
+        try { return records.size(); }
+        finally { lock.readLock().unlock(); }
+    }
+
     public Optional<Map<String, Object>> find(String id) {
         lock.readLock().lock();
         try { return Optional.ofNullable(records.get(id)).map(LinkedHashMap::new); }
