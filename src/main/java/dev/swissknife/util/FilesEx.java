@@ -19,6 +19,40 @@ public final class FilesEx {
         }
     }
 
+    /** Igual a walk(), mas restrito a arquivos alterados/adicionados segundo o Git (modo incremental para CI). */
+    public static List<Path> walkChanged(Path root, Predicate<Path> filter) throws IOException {
+        Set<Path> changed = changedFiles(root);
+        return walk(root, filter.and(changed::contains));
+    }
+
+    /** Arquivos modificados, adicionados ou não rastreados em relação a HEAD, via `git`. Vazio se não for repositório Git. */
+    public static Set<Path> changedFiles(Path root) {
+        Set<Path> result = new HashSet<>();
+        collectGitPaths(root, result, "diff", "--name-only", "HEAD");
+        collectGitPaths(root, result, "ls-files", "--others", "--exclude-standard");
+        return result;
+    }
+
+    private static void collectGitPaths(Path root, Set<Path> out, String... gitArgs) {
+        Process process = null;
+        try {
+            List<String> command = new ArrayList<>(List.of("git"));
+            command.addAll(List.of(gitArgs));
+            // redirectErrorStream evita deadlock: se stderr não for drenado e encher o pipe, o processo
+            // filho trava indefinidamente esperando alguém ler, e waitFor nunca retorna.
+            process = new ProcessBuilder(command).directory(root.toFile()).redirectErrorStream(true).start();
+            String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
+            if (process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)) {
+                if (process.exitValue() == 0)
+                    output.lines().filter(line -> !line.isBlank())
+                        .forEach(line -> out.add(root.resolve(line).toAbsolutePath().normalize()));
+            } else {
+                process.destroyForcibly();
+            }
+        } catch (Exception ignored) { /* fora de um repositório Git, simplesmente não há arquivos "alterados" */ }
+        finally { if (process != null) process.destroyForcibly(); }
+    }
+
     private static List<PathMatcher> ignoreMatchers(Path root) throws IOException {
         List<PathMatcher> result = new ArrayList<>();
         for (String filename : List.of(".gitignore", ".swissknifeignore")) {
