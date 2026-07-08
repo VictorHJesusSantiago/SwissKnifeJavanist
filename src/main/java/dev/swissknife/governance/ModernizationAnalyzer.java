@@ -19,7 +19,13 @@ public final class ModernizationAnalyzer {
         new Rule("PLATFORM_THREAD_POOL", "MEDIUM", "Executors\\.new(Fixed|Cached)ThreadPool",
             "Avalie virtual threads para tarefas bloqueantes."),
         new Rule("DEPRECATED_FINALIZE", "HIGH", "\\bvoid\\s+finalize\\s*\\(", "Remova finalize; use Cleaner ou AutoCloseable."),
-        new Rule("JUNIT4", "MEDIUM", "org\\.junit\\.(Test|Before|After|Assert)", "Migre para JUnit Jupiter.")
+        new Rule("JUNIT4", "MEDIUM", "org\\.junit\\.(Test|Before|After|Assert)", "Migre para JUnit Jupiter."),
+        new Rule("TEXT_BLOCK_OPPORTUNITY", "LOW",
+            "\"[^\"]*\\\\n\"\\s*\\+\\s*\"[^\"]*\\\\n\"", "Considere um text block (\"\"\") em vez de concatenação com \\n."),
+        new Rule("RECORD_OPPORTUNITY", "LOW",
+            "(?s)class\\s+\\w+\\s*\\{(?:(?!class).)*private\\s+final\\s+\\w.*?private\\s+final\\s+\\w.*?" +
+            "public\\s+boolean\\s+equals.*?public\\s+int\\s+hashCode.*?public\\s+String\\s+toString",
+            "Classe imutável com equals/hashCode/toString manuais; avalie convertê-la em record.")
     );
     public Report analyze(Path root, int targetJava) throws IOException {
         List<Finding> findings = new ArrayList<>();
