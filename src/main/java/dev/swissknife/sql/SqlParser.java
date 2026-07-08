@@ -120,8 +120,15 @@ public final class SqlParser {
         String upper = current().text().toUpperCase(Locale.ROOT);
         return Set.of("WHERE", "JOIN", "ON", "GROUP", "ORDER", "INNER", "LEFT", "RIGHT", "FULL").contains(upper);
     }
+    /**
+     * Extrai o alias/identificador de uma expressão de coluna já normalizada com espaços simples.
+     * Usa o ÚLTIMO "AS" no nível textual (não o primeiro espaço) para não confundir a saída com
+     * palavras internas de expressões multi-token como "CASE WHEN x THEN y ELSE z END AS alias".
+     */
     private String firstIdentifier(String expression) {
-        String[] parts = expression.split("\\s+AS\\s+|\\s+", 2);
+        String[] byAs = expression.split("(?i)\\bAS\\b");
+        if (byAs.length > 1) return byAs[byAs.length - 1].trim().replaceAll("[()]", "");
+        String[] parts = expression.trim().split("\\s+");
         return parts.length > 0 ? parts[parts.length - 1].replaceAll("[()]", "") : expression;
     }
     private String unqualify(String value) {
