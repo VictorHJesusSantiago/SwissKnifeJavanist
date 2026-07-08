@@ -1,3 +1,5 @@
+import org.jetbrains.intellij.platform.gradle.IntelliJPlatformType
+
 plugins {
     id("java")
     id("org.jetbrains.intellij.platform") version "2.5.0"
@@ -27,5 +29,10 @@ intellijPlatform {
         name = "SwissKnife Javanist"
         ideaVersion { sinceBuild = "251" }
         vendor { name = "SwissKnife"; email = "dev@swissknife.local" }
+    }
+    pluginVerification {
+        ides {
+            ide(IntelliJPlatformType.IntellijIdeaCommunity, "2025.1")
+        }
     }
 }
