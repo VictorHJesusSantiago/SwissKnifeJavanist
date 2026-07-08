@@ -1,0 +1,5 @@
+Nested Loop  (cost=0.43..902.17 rows=1200 width=64) (actual time=0.041..18.725 rows=1180 loops=1)
+  -> Seq Scan on orders  (cost=0.00..420.00 rows=1200 width=32) (actual time=0.018..8.210 rows=1180 loops=1)
+       Filter: (created_at >= CURRENT_DATE)
+  -> Index Scan using customers_pkey on customers  (cost=0.43..0.51 rows=1 width=32)
+       Index Cond: (id = orders.customer_id)
