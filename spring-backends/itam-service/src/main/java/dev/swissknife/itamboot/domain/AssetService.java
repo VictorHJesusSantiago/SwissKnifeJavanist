@@ -1,6 +1,8 @@
 package dev.swissknife.itamboot.domain;
 
 import dev.swissknife.itamboot.api.AssetRequest;
+import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.server.ResponseStatusException;
@@ -14,14 +16,26 @@ public class AssetService {
     private final AssetRepository repository;
     public AssetService(AssetRepository repository){this.repository=repository;}
     @Transactional(readOnly=true) public List<Asset> list(){return list(null,null,null,null);}
+    /**
+     * Filtragem via Specification (traduzida para WHERE no banco) em vez de findAll()+stream, para
+     * não carregar a tabela inteira em memória a cada chamada quando o volume de ativos crescer.
+     */
     @Transactional(readOnly=true)
     public List<Asset> list(Asset.Status status,Asset.Type type,String owner,String query){
-        String q=query==null?"":query.toLowerCase(Locale.ROOT);
-        return repository.findAll().stream().filter(a->status==null||a.getStatus()==status)
-            .filter(a->type==null||a.getType()==type)
-            .filter(a->owner==null||owner.equalsIgnoreCase(Objects.toString(a.getAssignedTo(),"")))
-            .filter(a->q.isBlank()||searchable(a).contains(q))
-            .sorted(Comparator.comparing(Asset::getCreatedAt).reversed()).toList();
+        Specification<Asset> spec=Specification.where(null);
+        if(status!=null) spec=spec.and((root,cq,cb)->cb.equal(root.get("status"),status));
+        if(type!=null) spec=spec.and((root,cq,cb)->cb.equal(root.get("type"),type));
+        if(owner!=null && !owner.isBlank()) spec=spec.and((root,cq,cb)->cb.equal(cb.lower(root.get("assignedTo")),owner.toLowerCase(Locale.ROOT)));
+        if(query!=null && !query.isBlank()){
+            String pattern="%"+query.toLowerCase(Locale.ROOT)+"%";
+            spec=spec.and((root,cq,cb)->cb.or(
+                cb.like(cb.lower(root.get("tag")),pattern), cb.like(cb.lower(root.get("name")),pattern),
+                cb.like(cb.lower(cb.coalesce(root.get("serialNumber"),"")),pattern),
+                cb.like(cb.lower(cb.coalesce(root.get("hostname"),"")),pattern),
+                cb.like(cb.lower(cb.coalesce(root.get("manufacturer"),"")),pattern),
+                cb.like(cb.lower(cb.coalesce(root.get("model"),"")),pattern)));
+        }
+        return repository.findAll(spec, Sort.by(Sort.Direction.DESC,"createdAt"));
     }
     @Transactional(readOnly=true) public Asset get(UUID id){return repository.findById(id).orElseThrow(()->new ResponseStatusException(NOT_FOUND));}
     public Asset create(AssetRequest r){
@@ -46,8 +60,4 @@ public class AssetService {
         return Map.of("total",all.size(),"totalPurchaseValue",total,"byType",types,"byStatus",statuses,
             "warrantyExpiringIn90Days",warrantyExpiring);
     }
-    private String searchable(Asset a){return String.join(" ",Objects.toString(a.getTag(),""),
-        Objects.toString(a.getName(),""),Objects.toString(a.getSerialNumber(),""),
-        Objects.toString(a.getHostname(),""),Objects.toString(a.getManufacturer(),""),
-        Objects.toString(a.getModel(),"")).toLowerCase(Locale.ROOT);}
 }
