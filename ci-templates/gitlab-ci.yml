@@ -1,0 +1,21 @@
+# Template de GitLab CI para SwissKnife Javanist.
+# Copie para .gitlab-ci.yml na raiz do projeto e ajuste os caminhos conforme necessário.
+stages:
+  - governance
+
+swissknife-quality-gate:
+  stage: governance
+  image: eclipse-temurin:21-jdk
+  script:
+    - ./build.sh
+    - java -jar build/swissknife.jar release-readiness . --format sarif --output swissknife.sarif
+  artifacts:
+    when: always
+    reports:
+      sast: swissknife.sarif
+    paths:
+      - swissknife.sarif
+    expire_in: 30 days
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'

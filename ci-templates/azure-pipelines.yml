@@ -1,0 +1,32 @@
+# Template de Azure DevOps Pipeline para SwissKnife Javanist.
+# Copie para azure-pipelines.yml na raiz do projeto e ajuste os caminhos conforme necessário.
+trigger:
+  branches:
+    include: [main]
+pr:
+  branches:
+    include: ['*']
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+steps:
+  - task: JavaToolInstaller@0
+    inputs:
+      versionSpec: '21'
+      jdkArchitectureOption: 'x64'
+      jdkSourceOption: 'PreInstalled'
+  - script: ./build.sh
+    displayName: 'Build da CLI SwissKnife'
+  - script: java -jar build/swissknife.jar release-readiness . --format junit --output $(Build.ArtifactStagingDirectory)/swissknife-release.xml
+    displayName: 'Quality gate de governança'
+  - task: PublishTestResults@2
+    condition: always()
+    inputs:
+      testResultsFormat: 'JUnit'
+      testResultsFiles: '$(Build.ArtifactStagingDirectory)/swissknife-release.xml'
+  - task: PublishBuildArtifacts@1
+    condition: always()
+    inputs:
+      pathToPublish: '$(Build.ArtifactStagingDirectory)'
+      artifactName: 'swissknife-reports'
