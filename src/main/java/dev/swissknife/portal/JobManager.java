@@ -45,6 +45,7 @@ public final class JobManager implements AutoCloseable {
             .limit(Math.max(1,Math.min(limit,1000))).map(MutableJob::snapshot).toList();
     }
     public Optional<Job> find(String id){MutableJob job=jobs.get(id);return job==null?Optional.empty():Optional.of(job.snapshot());}
+    private static final Path ARTIFACT_BASE=Path.of(System.getProperty("user.dir")).toAbsolutePath().normalize();
     /** Extrai o caminho do artefato gerado por um job concluído (campo "output" do resultado), se houver. */
     public Optional<Path> artifactPath(String id){
         MutableJob job=jobs.get(id);
@@ -53,7 +54,10 @@ public final class JobManager implements AutoCloseable {
         if(!(normalized instanceof Map<?,?> map))return Optional.empty();
         Object output=map.get("output");
         if(output==null)return Optional.empty();
-        Path candidate=Path.of(String.valueOf(output));
+        Path candidate;
+        try{candidate=Path.of(String.valueOf(output)).toAbsolutePath().normalize();}
+        catch(Exception e){return Optional.empty();}
+        if(!candidate.startsWith(ARTIFACT_BASE))return Optional.empty();
         return java.nio.file.Files.isRegularFile(candidate)?Optional.of(candidate):Optional.empty();
     }
     public Job cancel(String id){
