@@ -2,7 +2,9 @@ package dev.swissknife.server;
 
 import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
+import java.security.MessageDigest;
 import java.security.SecureRandom;
+import java.nio.charset.StandardCharsets;
 import java.util.Base64;
 
 /**
@@ -35,10 +37,13 @@ public final class Totp {
 
     /** Verifica um código informado pelo usuário, tolerando +/-1 passo de 30s (skew de relógio). */
     public static boolean verify(String base32Secret, String submittedCode) {
+        if (submittedCode == null) return false;
         long step = System.currentTimeMillis() / 1000 / STEP_SECONDS;
+        boolean match = false;
         for (long delta = -1; delta <= 1; delta++)
-            if (code(base32Secret, step + delta).equals(submittedCode)) return true;
-        return false;
+            match |= MessageDigest.isEqual(code(base32Secret, step + delta).getBytes(StandardCharsets.UTF_8),
+                submittedCode.getBytes(StandardCharsets.UTF_8));
+        return match;
     }
 
     private static String code(String base32Secret, long counter) {
