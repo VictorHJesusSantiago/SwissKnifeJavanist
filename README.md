@@ -47,6 +47,8 @@ Actuator e testes MockMvc, ficam em `spring-backends/`.
 ./swissknife.cmd docs ./src ./docs/API.md
 ./swissknife.cmd deps ./examples/services ./docs/services.mmd
 ./swissknife.cmd slow-query "SELECT * FROM orders WHERE customer_id = ? ORDER BY created_at"
+./swissknife.cmd slow-query-plan postgresql ./explain.txt
+./swissknife.cmd slow-query-explain postgresql jdbc:postgresql://localhost/app app DB_PASSWORD false "SELECT * FROM orders"
 ./swissknife.cmd schema-diff examples/schema/source.sql examples/schema/target.sql
 ./swissknife.cmd anonymize examples/data/people.csv examples/data/policy.properties ./out.csv
 ./swissknife.cmd debt ./src
@@ -138,6 +140,8 @@ spring-audit spring-backends
 
 As APIs respondem JSON. Em ambos os servidores, `GET /health` fornece o estado
 do processo. Consulte [docs/API.md](docs/API.md) para as rotas.
+Consulte também [docs/VALIDATION.md](docs/VALIDATION.md) para a matriz que liga
+cada produto à implementação e aos testes automatizados correspondentes.
 
 ## Estrutura
 
