@@ -17,12 +17,16 @@ public final class AiAssistant {
 
     public Result execute(Path configuration,String task,Path input,boolean send,boolean consent)
         throws IOException,InterruptedException{
+        return execute(configuration,task,input,send,consent,"");
+    }
+    public Result execute(Path configuration,String task,Path input,boolean send,boolean consent,String question)
+        throws IOException,InterruptedException{
         Properties p=new Properties();try(var reader=Files.newBufferedReader(configuration)){p.load(reader);}
         String provider=p.getProperty("provider","openai-compatible").toLowerCase(Locale.ROOT);
         String model=required(p,"model"),raw=Files.readString(input);
         String redacted=redact(raw);int maxInput=integer(p,"maxInputCharacters",100_000);
         if(redacted.length()>maxInput)redacted=redacted.substring(0,maxInput)+"\n[TRUNCADO]";
-        String prompt=prompt(task,redacted,p.getProperty("additionalInstructions",""));
+        String prompt=prompt(task,redacted,p.getProperty("additionalInstructions",""),question);
         int estimatedTokens=Math.max(1,prompt.length()/4);
         int maxTokens=integer(p,"maxTokens",2_000);
         double estimatedCost=estimatedTokens/1000.0*decimal(p,"inputCostPer1k",0);
@@ -72,7 +76,7 @@ public final class AiAssistant {
         };
         return new Request(url,Map.of("Content-Type","application/json"),Json.stringify(body));
     }
-    private String prompt(String task,String input,String additional){
+    private String prompt(String task,String input,String additional,String question){
         String instruction=switch(task.toLowerCase(Locale.ROOT)){
             case"explain"->"Explique os findings em PT-BR, com causa, impacto, evidência e correção.";
             case"summarize"->"Produza resumo executivo e resumo técnico, preservando números e incertezas.";
@@ -82,7 +86,12 @@ public final class AiAssistant {
             case"anonymize-policy"->"Proponha política de anonimização LGPD revisável, preservando relacionamentos.";
             case"adr"->"Gere uma ADR com contexto, decisão, alternativas, consequências e rollback.";
             case"modernization"->"Crie plano incremental de modernização Java com testes e rollback.";
-            default->throw new IllegalArgumentException("Tarefa IA: explain, summarize, prioritize, fix, sql, anonymize-policy, adr ou modernization");
+            case"group-errors"->"Agrupe semanticamente os erros/exceções por causa raiz provável, ignorando diferenças superficiais de mensagem.";
+            case"query"->{
+                if(question.isBlank())throw new IllegalArgumentException("Tarefa 'query' exige uma pergunta (parâmetro question)");
+                yield "Responda em PT-BR, somente com base na entrada abaixo; se a resposta não estiver na entrada, diga que não sabe. Pergunta: "+question;
+            }
+            default->throw new IllegalArgumentException("Tarefa IA: explain, summarize, prioritize, fix, sql, anonymize-policy, adr, modernization, group-errors ou query");
         };
         return instruction+(additional.isBlank()?"":"\nInstruções adicionais: "+additional)+"\n\nEntrada redigida:\n"+input;
     }
