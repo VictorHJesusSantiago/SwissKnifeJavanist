@@ -1,9 +1,7 @@
 # Plugin IntelliJ
 
-Abra esta pasta como projeto Gradle no IntelliJ IDEA e execute a tarefa
-`runIde`. O menu **Tools > SwissKnife** oferece geração de documentação e
-análise de débito técnico, qualidade Java, segurança, arquitetura e auditoria
-Spring Boot.
+O menu **Tools > SwissKnife** oferece geração de documentação, análise de
+débito técnico, qualidade Java, segurança, arquitetura e auditoria Spring Boot.
 
 O plugin procura o JAR nesta ordem:
 
@@ -13,3 +11,17 @@ O plugin procura o JAR nesta ordem:
 4. `~/.swissknife/swissknife.jar`.
 
 Defina `SWISSKNIFE_IDE_TIMEOUT_MS` para ajustar o timeout das análises.
+
+## Compilar e verificar
+
+Use JDK 21 e Gradle 8.13:
+
+```powershell
+.\verify.cmd
+```
+
+O ZIP instalável é produzido em `build/distributions/`. A tarefa executa o
+IntelliJ Plugin Verifier contra o IntelliJ IDEA Community 2025.1. Para testar
+interativamente, execute a tarefa Gradle `runIde`.
+
+O identificador publicado do plugin é `dev.swissknife.productivity`.
