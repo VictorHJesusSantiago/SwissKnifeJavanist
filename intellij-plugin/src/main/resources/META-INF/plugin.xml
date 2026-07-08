@@ -1,8 +1,12 @@
 <idea-plugin>
-    <id>dev.swissknife.intellij</id>
+    <id>dev.swissknife.productivity</id>
     <name>SwissKnife Javanist</name>
-    <vendor>SwissKnife</vendor>
-    <description>Executa documentação e análise de débito técnico diretamente no projeto.</description>
+    <vendor email="dev@swissknife.local">SwissKnife</vendor>
+    <description><![CDATA[
+        SwissKnife Javanist provides project documentation, technical-debt
+        tracking, Java quality analysis, security scanning, architecture
+        visualization, and Spring Boot governance directly inside the IDE.
+    ]]></description>
     <depends>com.intellij.modules.platform</depends>
     <actions>
         <group id="SwissKnife.Menu" text="SwissKnife" popup="true">
@@ -26,6 +30,19 @@
             <action id="SwissKnife.SpringAudit"
                     class="dev.swissknife.intellij.SpringAuditAction"
                     text="Auditar Spring Boot"/>
+            <separator/>
+            <action id="SwissKnife.DependencyAudit"
+                    class="dev.swissknife.intellij.DependencyAuditAction"
+                    text="Auditar dependências e SBOM"/>
+            <action id="SwissKnife.TestAudit"
+                    class="dev.swissknife.intellij.TestAuditAction"
+                    text="Auditar testes"/>
+            <action id="SwissKnife.Modernize"
+                    class="dev.swissknife.intellij.ModernizeAction"
+                    text="Planejar modernização"/>
+            <action id="SwissKnife.ReleaseReadiness"
+                    class="dev.swissknife.intellij.ReleaseReadinessAction"
+                    text="Prontidão de release"/>
         </group>
     </actions>
 </idea-plugin>
