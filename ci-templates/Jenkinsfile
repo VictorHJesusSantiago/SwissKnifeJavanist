@@ -1,0 +1,22 @@
+// Template de pipeline Jenkins para SwissKnife Javanist.
+// Copie para Jenkinsfile na raiz do projeto e ajuste os caminhos conforme necessário.
+pipeline {
+    agent any
+    tools { jdk 'temurin-21' }
+    stages {
+        stage('Build da CLI') {
+            steps { sh './build.sh' }
+        }
+        stage('Quality gate de governança') {
+            steps {
+                sh 'java -jar build/swissknife.jar release-readiness . --format junit --output swissknife-release.xml'
+            }
+        }
+    }
+    post {
+        always {
+            junit allowEmptyResults: true, testResults: 'swissknife-release.xml'
+            archiveArtifacts artifacts: 'swissknife-release.xml', allowEmptyArchive: true
+        }
+    }
+}
