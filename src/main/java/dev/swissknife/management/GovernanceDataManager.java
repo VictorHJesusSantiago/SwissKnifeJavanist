@@ -63,7 +63,8 @@ public final class GovernanceDataManager {
     }
 
     public VulnerabilityReport vulnerabilityReport(Path database) throws IOException{
-        List<Map<String,Object>> all=new JsonStore(database).all();
+        List<Map<String,Object>> everything=new JsonStore(database).all();
+        List<Map<String,Object>> all=everything.stream().filter(item->!isDeleted(item)).toList();
         Map<String,Long> severity=count(all,"severity"),status=count(all,"status"),project=count(all,"project");
         long overdue=all.stream().filter(this::overdue).count();
         double averageAge=all.stream().mapToLong(item->age(item.get("createdAt"))).average().orElse(0);
@@ -72,7 +73,65 @@ public final class GovernanceDataManager {
             .average().orElse(0);
         List<Map<String,Object>> oldest=all.stream().sorted(Comparator.comparingLong((Map<String,Object> item)->age(item.get("createdAt"))).reversed())
             .limit(20).toList();
-        return new VulnerabilityReport(all.size(),overdue,averageAge,mttr,severity,status,project,oldest);
+        Map<String,Long> aging=new LinkedHashMap<>();
+        aging.put("0-30",all.stream().filter(item->age(item.get("createdAt"))<=30).count());
+        aging.put("31-90",all.stream().filter(item->{long a=age(item.get("createdAt"));return a>30&&a<=90;}).count());
+        aging.put("90+",all.stream().filter(item->age(item.get("createdAt"))>90).count());
+        long deleted=everything.size()-all.size();
+        return new VulnerabilityReport(all.size(),overdue,averageAge,mttr,severity,status,project,oldest,aging,deleted);
+    }
+
+    /** Aplica a mesma transição de workflow a vários IDs, retornando sucesso/erro por item. */
+    public List<BulkResult> vulnerabilityBulkTransition(Path database,List<String> ids,String status,String actor,String comment)
+        throws IOException{
+        List<BulkResult> results=new ArrayList<>();
+        for(String id:ids){
+            try{ vulnerabilityTransition(database,id,status,actor,comment); results.add(new BulkResult(id,true,"")); }
+            catch(Exception e){ results.add(new BulkResult(id,false,e.getMessage())); }
+        }
+        return results;
+    }
+
+    /** Exclusão lógica: o registro permanece no store e na auditoria, mas some dos relatórios/listagens padrão. */
+    public WorkflowResult vulnerabilitySoftDelete(Path database,String id,String actor) throws IOException{
+        JsonStore store=new JsonStore(database);
+        Map<String,Object> item=store.find(id).orElseThrow(()->new IllegalArgumentException("Vulnerabilidade não encontrada: "+id));
+        item.put("deletedAt",Instant.now().toString()); item.put("deletedBy",actor); store.save(item);
+        return new WorkflowResult(id,String.valueOf(item.getOrDefault("status","")),"DELETED",actor,0);
+    }
+    public WorkflowResult vulnerabilityRestore(Path database,String id) throws IOException{
+        JsonStore store=new JsonStore(database);
+        Map<String,Object> item=store.find(id).orElseThrow(()->new IllegalArgumentException("Vulnerabilidade não encontrada: "+id));
+        item.remove("deletedAt"); item.remove("deletedBy"); store.save(item);
+        return new WorkflowResult(id,"DELETED",String.valueOf(item.getOrDefault("status","")),"",0);
+    }
+
+    /** Reverte para OPEN os riscos aceitos cuja janela de aceitação (acceptedUntil) já expirou. */
+    public List<WorkflowResult> reviewAcceptedRisk(Path database) throws IOException{
+        JsonStore store=new JsonStore(database);
+        List<WorkflowResult> reverted=new ArrayList<>();
+        for(Map<String,Object> item:store.all()){
+            if(!"ACCEPTED".equals(item.get("status"))) continue;
+            LocalDate until=date(item.get("acceptedUntil"));
+            if(until==null||!until.isBefore(LocalDate.now())) continue;
+            reverted.add(vulnerabilityTransition(database,String.valueOf(item.get("id")),"OPEN","system",
+                "Aceitação de risco expirada em "+until));
+        }
+        return reverted;
+    }
+
+    /** Mescla duas vulnerabilidades duplicadas: mergeId é marcado como excluído/mesclado, keepId herda o histórico. */
+    public WorkflowResult vulnerabilityMerge(Path database,String keepId,String mergeId,String actor) throws IOException{
+        JsonStore store=new JsonStore(database);
+        Map<String,Object> keep=store.find(keepId).orElseThrow(()->new IllegalArgumentException("Vulnerabilidade não encontrada: "+keepId));
+        Map<String,Object> merged=store.find(mergeId).orElseThrow(()->new IllegalArgumentException("Vulnerabilidade não encontrada: "+mergeId));
+        List<Object> history=list(keep.get("history"));
+        history.add(Map.of("timestamp",Instant.now().toString(),"actor",actor,"from","MERGE","to","MERGE",
+            "comment","Mesclado com "+mergeId));
+        keep.put("history",history); store.save(keep);
+        merged.put("deletedAt",Instant.now().toString()); merged.put("deletedBy",actor); merged.put("mergedInto",keepId);
+        store.save(merged);
+        return new WorkflowResult(keepId,mergeId,keepId,actor,history.size());
     }
 
     public ImportReport importAssets(Path database,Path csv) throws IOException{
@@ -111,14 +170,46 @@ public final class GovernanceDataManager {
         if(action.equalsIgnoreCase("checkout"))asset.put("assignedTo",actor);
         if(action.equalsIgnoreCase("checkin"))asset.remove("assignedTo");
         asset.put("status",target);asset.put("updatedAt",Instant.now().toString());
+        if(action.equalsIgnoreCase("maintenance")){
+            var costMatcher=java.util.regex.Pattern.compile("cost=(\\d+(?:\\.\\d+)?)").matcher(details==null?"":details);
+            if(costMatcher.find()){
+                double cost=Double.parseDouble(costMatcher.group(1));
+                asset.put("maintenanceCostTotal",number(asset.get("maintenanceCostTotal"))+cost);
+            }
+        }
         List<Object> history=list(asset.get("history"));history.add(Map.of("timestamp",Instant.now().toString(),
             "action",action.toUpperCase(Locale.ROOT),"actor",actor,"from",from,"to",target,
             "details",details==null?"":details));asset.put("history",history);store.save(asset);
         return new WorkflowResult(id,from,target,actor,history.size());
     }
 
+    /** Aplica a mesma ação (checkout/checkin/maintenance/retire/lost) a vários ativos. */
+    public List<BulkResult> assetBulkTransition(Path database,List<String> ids,String action,String actor,String details)
+        throws IOException{
+        List<BulkResult> results=new ArrayList<>();
+        for(String id:ids){
+            try{ assetTransition(database,id,action,actor,details); results.add(new BulkResult(id,true,"")); }
+            catch(Exception e){ results.add(new BulkResult(id,false,e.getMessage())); }
+        }
+        return results;
+    }
+
+    public WorkflowResult assetSoftDelete(Path database,String id,String actor) throws IOException{
+        JsonStore store=new JsonStore(database);
+        Map<String,Object> asset=store.find(id).orElseThrow(()->new IllegalArgumentException("Ativo não encontrado: "+id));
+        asset.put("deletedAt",Instant.now().toString()); asset.put("deletedBy",actor); store.save(asset);
+        return new WorkflowResult(id,String.valueOf(asset.getOrDefault("status","")),"DELETED",actor,0);
+    }
+    public WorkflowResult assetRestore(Path database,String id) throws IOException{
+        JsonStore store=new JsonStore(database);
+        Map<String,Object> asset=store.find(id).orElseThrow(()->new IllegalArgumentException("Ativo não encontrado: "+id));
+        asset.remove("deletedAt"); asset.remove("deletedBy"); store.save(asset);
+        return new WorkflowResult(id,"DELETED",String.valueOf(asset.getOrDefault("status","")),"",0);
+    }
+
     public AssetReport assetReport(Path database) throws IOException{
-        List<Map<String,Object>> all=new JsonStore(database).all();
+        List<Map<String,Object>> everything=new JsonStore(database).all();
+        List<Map<String,Object>> all=everything.stream().filter(item->!isDeleted(item)).toList();
         Map<String,Long> types=count(all,"type"),statuses=count(all,"status"),departments=count(all,"department");
         double value=all.stream().map(item->number(item.get("purchaseValue"))).mapToDouble(Double::doubleValue).sum();
         long warranty=all.stream().filter(item->{
@@ -126,7 +217,21 @@ public final class GovernanceDataManager {
         }).count();
         long unassigned=all.stream().filter(item->String.valueOf(item.getOrDefault("assignedTo","")).isBlank()&&
             String.valueOf(item.getOrDefault("status","")).equals("IN_USE")).count();
-        return new AssetReport(all.size(),value,warranty,unassigned,types,statuses,departments);
+        double bookValue=all.stream().mapToDouble(this::depreciatedValue).sum();
+        double maintenanceCost=all.stream().mapToDouble(item->number(item.get("maintenanceCostTotal"))).sum();
+        long deleted=everything.size()-all.size();
+        return new AssetReport(all.size(),value,warranty,unassigned,types,statuses,departments,bookValue,maintenanceCost,deleted);
+    }
+
+    /** Depreciação linear simples: valor - (valor/vidaÚtilAnos)*anosDecorridos, nunca abaixo de zero. */
+    private double depreciatedValue(Map<String,Object> asset){
+        double purchaseValue=number(asset.get("purchaseValue"));
+        LocalDate purchaseDate=date(asset.get("purchaseDate"));
+        double usefulLifeYears=number(asset.get("usefulLifeYears"));
+        if(purchaseDate==null||usefulLifeYears<=0) return purchaseValue;
+        double yearsElapsed=ChronoUnit.DAYS.between(purchaseDate,LocalDate.now())/365.25;
+        double remaining=1.0-Math.min(1.0,Math.max(0,yearsElapsed/usefulLifeYears));
+        return purchaseValue*remaining;
     }
 
     @SuppressWarnings("unchecked")
@@ -174,6 +279,7 @@ public final class GovernanceDataManager {
     }
     private String fingerprint(Map<String,Object> item){return Integer.toHexString(Objects.hash(
         item.get("cve"),item.get("title"),item.get("component"),item.get("dependencyName"),item.get("affectedVersion")));}
+    private boolean isDeleted(Map<String,Object> item){ return item.get("deletedAt")!=null; }
     private boolean overdue(Map<String,Object> item){Instant due=instant(item.get("dueAt"));String status=String.valueOf(item.getOrDefault("status","OPEN"));
         return due!=null&&due.isBefore(Instant.now())&&!Set.of("RESOLVED","ACCEPTED").contains(status);}
     private long age(Object value){Instant created=instant(value);return created==null?0:Math.max(0,ChronoUnit.DAYS.between(created,Instant.now()));}
@@ -197,7 +303,10 @@ public final class GovernanceDataManager {
     public record ImportReport(String format,int processed,int created,int updated,int skipped,Path database){}
     public record WorkflowResult(String id,String from,String to,String actor,int historyEntries){}
     public record VulnerabilityReport(int total,long overdue,double averageAgeDays,double mttrHours,
-        Map<String,Long> bySeverity,Map<String,Long> byStatus,Map<String,Long> byProject,List<Map<String,Object>> oldest){}
+        Map<String,Long> bySeverity,Map<String,Long> byStatus,Map<String,Long> byProject,List<Map<String,Object>> oldest,
+        Map<String,Long> aging,long deleted){}
     public record AssetReport(int total,double purchaseValue,long warrantyExpiringIn90Days,long inUseWithoutAssignee,
-        Map<String,Long> byType,Map<String,Long> byStatus,Map<String,Long> byDepartment){}
+        Map<String,Long> byType,Map<String,Long> byStatus,Map<String,Long> byDepartment,
+        double bookValue,double maintenanceCostTotal,long deleted){}
+    public record BulkResult(String id,boolean success,String error){}
 }
