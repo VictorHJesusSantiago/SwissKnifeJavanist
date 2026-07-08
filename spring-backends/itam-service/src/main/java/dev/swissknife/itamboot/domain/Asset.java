@@ -3,7 +3,7 @@ package dev.swissknife.itamboot.domain;
 import jakarta.persistence.*;
 import java.math.BigDecimal;
 import java.time.*;
-import java.util.UUID;
+import java.util.*;
 
 @Entity
 @Table(name="assets",uniqueConstraints=@UniqueConstraint(name="uk_asset_tag",columnNames="tag"))
@@ -39,6 +39,20 @@ public class Asset {
         purchaseValue=value;purchaseDate=date;updatedAt=Instant.now();
         details(manufacturer,model,hostname,ipAddress,macAddress,operatingSystem,osVersion,locationName,department,
             costCenter,vendor,warrantyEnd,notes,tags);
+    }
+    public void transition(Status next,String owner){
+        if(next==null)throw new IllegalArgumentException("status é obrigatório");
+        Set<Status> allowed=switch(status){
+            case IN_STOCK->EnumSet.of(Status.IN_USE,Status.MAINTENANCE,Status.RETIRED,Status.LOST);
+            case IN_USE->EnumSet.of(Status.IN_STOCK,Status.MAINTENANCE,Status.RETIRED,Status.LOST);
+            case MAINTENANCE->EnumSet.of(Status.IN_STOCK,Status.IN_USE,Status.RETIRED);
+            case RETIRED->EnumSet.noneOf(Status.class);
+            case LOST->EnumSet.of(Status.IN_STOCK,Status.IN_USE,Status.RETIRED);
+        };
+        if(!allowed.contains(next))throw new IllegalArgumentException("Transição inválida: "+status+" -> "+next);
+        if(next==Status.IN_USE&&(owner==null||owner.isBlank()))
+            throw new IllegalArgumentException("assignedTo é obrigatório para ativo em uso");
+        status=next;assignedTo=next==Status.IN_USE?owner.trim():null;updatedAt=Instant.now();
     }
     private void details(String manufacturer,String model,String hostname,String ipAddress,String macAddress,
         String operatingSystem,String osVersion,String locationName,String department,String costCenter,String vendor,

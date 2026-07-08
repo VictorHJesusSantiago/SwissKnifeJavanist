@@ -13,7 +13,16 @@ import static org.springframework.http.HttpStatus.*;
 public class AssetService {
     private final AssetRepository repository;
     public AssetService(AssetRepository repository){this.repository=repository;}
-    @Transactional(readOnly=true) public List<Asset> list(){return repository.findAll();}
+    @Transactional(readOnly=true) public List<Asset> list(){return list(null,null,null,null);}
+    @Transactional(readOnly=true)
+    public List<Asset> list(Asset.Status status,Asset.Type type,String owner,String query){
+        String q=query==null?"":query.toLowerCase(Locale.ROOT);
+        return repository.findAll().stream().filter(a->status==null||a.getStatus()==status)
+            .filter(a->type==null||a.getType()==type)
+            .filter(a->owner==null||owner.equalsIgnoreCase(Objects.toString(a.getAssignedTo(),"")))
+            .filter(a->q.isBlank()||searchable(a).contains(q))
+            .sorted(Comparator.comparing(Asset::getCreatedAt).reversed()).toList();
+    }
     @Transactional(readOnly=true) public Asset get(UUID id){return repository.findById(id).orElseThrow(()->new ResponseStatusException(NOT_FOUND));}
     public Asset create(AssetRequest r){
         if(repository.existsByTag(r.tag()))throw new ResponseStatusException(CONFLICT,"Tag já cadastrada");
@@ -28,6 +37,7 @@ public class AssetService {
         r.warrantyEnd(),r.notes(),r.tagsText());return a;
     }
     public void delete(UUID id){if(!repository.existsById(id))throw new ResponseStatusException(NOT_FOUND);repository.deleteById(id);}
+    public Asset transition(UUID id,Asset.Status status,String owner){var a=get(id);a.transition(status,owner);return a;}
     @Transactional(readOnly=true) public Map<String,Object> inventory(){
         var all=repository.findAll();Map<String,Long> types=new TreeMap<>(),statuses=new TreeMap<>();
         all.forEach(a->{types.merge(a.getType().name(),1L,Long::sum);statuses.merge(a.getStatus().name(),1L,Long::sum);});
@@ -36,4 +46,8 @@ public class AssetService {
         return Map.of("total",all.size(),"totalPurchaseValue",total,"byType",types,"byStatus",statuses,
             "warrantyExpiringIn90Days",warrantyExpiring);
     }
+    private String searchable(Asset a){return String.join(" ",Objects.toString(a.getTag(),""),
+        Objects.toString(a.getName(),""),Objects.toString(a.getSerialNumber(),""),
+        Objects.toString(a.getHostname(),""),Objects.toString(a.getManufacturer(),""),
+        Objects.toString(a.getModel(),"")).toLowerCase(Locale.ROOT);}
 }
