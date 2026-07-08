@@ -115,20 +115,33 @@ public final class PortalServer {
         exchange.sendResponseHeaders(200,bytes.length);
         try(var out=exchange.getResponseBody()){out.write(bytes);}
     }
+    private static final int MAX_SSE_CONNECTIONS_PER_CLIENT=
+        integerEnv("SWISSKNIFE_MAX_SSE_PER_CLIENT",3);
+    private final java.util.concurrent.ConcurrentMap<String,java.util.concurrent.atomic.AtomicInteger> sseConnections=
+        new java.util.concurrent.ConcurrentHashMap<>();
     /** Atualização em tempo real da lista de jobs via Server-Sent Events (substitui o polling). */
     private void jobEvents(HttpExchange exchange) throws IOException{
-        exchange.getResponseHeaders().set("Content-Type","text/event-stream; charset=utf-8");
-        exchange.getResponseHeaders().set("Cache-Control","no-cache");
-        exchange.sendResponseHeaders(200,0);
-        try(var out=exchange.getResponseBody()){
-            long deadline=System.currentTimeMillis()+Duration.ofMinutes(10).toMillis();
-            while(System.currentTimeMillis()<deadline){
-                String payload=Json.stringify(jobs.list(50,null));
-                out.write(("data: "+payload+"\n\n").getBytes(StandardCharsets.UTF_8));
-                out.flush();
-                try{Thread.sleep(2000);}catch(InterruptedException e){Thread.currentThread().interrupt();return;}
-            }
-        } catch(IOException clientDisconnected){ /* cliente fechou a conexão; encerra o stream silenciosamente */ }
+        String clientId=exchange.getRemoteAddress()==null?"unknown":exchange.getRemoteAddress().getAddress().getHostAddress();
+        var active=sseConnections.computeIfAbsent(clientId,ignored->new java.util.concurrent.atomic.AtomicInteger());
+        if(active.incrementAndGet()>MAX_SSE_CONNECTIONS_PER_CLIENT){
+            active.decrementAndGet();
+            HttpSupport.problem(exchange,429,"Limite de conexões simultâneas excedido","Máximo de "+MAX_SSE_CONNECTIONS_PER_CLIENT+" streams por cliente");
+            return;
+        }
+        try{
+            exchange.getResponseHeaders().set("Content-Type","text/event-stream; charset=utf-8");
+            exchange.getResponseHeaders().set("Cache-Control","no-cache");
+            exchange.sendResponseHeaders(200,0);
+            try(var out=exchange.getResponseBody()){
+                long deadline=System.currentTimeMillis()+Duration.ofMinutes(10).toMillis();
+                while(System.currentTimeMillis()<deadline){
+                    String payload=Json.stringify(jobs.list(50,null));
+                    out.write(("data: "+payload+"\n\n").getBytes(StandardCharsets.UTF_8));
+                    out.flush();
+                    try{Thread.sleep(2000);}catch(InterruptedException e){Thread.currentThread().interrupt();return;}
+                }
+            } catch(IOException clientDisconnected){ /* cliente fechou a conexão; encerra o stream silenciosamente */ }
+        } finally { active.decrementAndGet(); }
     }
     private void send(HttpExchange exchange,int status,Object value){try{HttpSupport.json(exchange,status,value);}catch(IOException e){throw new RuntimeException(e);}}
     private int parseInt(String value,int fallback){try{return value==null?fallback:Integer.parseInt(value);}catch(Exception e){return fallback;}}
