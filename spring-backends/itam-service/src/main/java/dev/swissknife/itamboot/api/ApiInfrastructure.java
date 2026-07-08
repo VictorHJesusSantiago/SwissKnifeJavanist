@@ -20,6 +20,17 @@ final class ApiInfrastructure { private ApiInfrastructure() {} }
 @Component
 @Order(Ordered.HIGHEST_PRECEDENCE)
 class ApiSecurityFilter extends OncePerRequestFilter {
+    private static final int MAX_ATTEMPTS = Integer.parseInt(
+        System.getenv().getOrDefault("SWISSKNIFE_MAX_AUTH_ATTEMPTS", "10"));
+    private static final long LOCKOUT_MILLIS = Long.parseLong(
+        System.getenv().getOrDefault("SWISSKNIFE_LOCKOUT_MINUTES", "5")) * 60_000;
+    private static final int RATE_LIMIT_PER_MINUTE = Integer.parseInt(
+        System.getenv().getOrDefault("SWISSKNIFE_RATE_LIMIT_PER_MINUTE", "120"));
+    private static final Map<String, FailureWindow> FAILURES = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final Map<String, RateWindow> RATE = new java.util.concurrent.ConcurrentHashMap<>();
+    private static final class FailureWindow { int count; long lockedUntil; }
+    private static final class RateWindow { int count; long windowStart; }
+
     @Override protected void doFilterInternal(HttpServletRequest request, HttpServletResponse response,
                                               FilterChain chain) throws ServletException, IOException {
         String requestId = request.getHeader("X-Request-ID");
@@ -36,17 +47,49 @@ class ApiSecurityFilter extends OncePerRequestFilter {
             response.setHeader("Access-Control-Allow-Headers", "Authorization,Content-Type,X-Request-ID");
             response.setStatus(204); return;
         }
+        String clientId = request.getRemoteAddr() == null ? "unknown" : request.getRemoteAddr();
+        if (!checkRateLimit(clientId)) {
+            response.setStatus(429); response.setContentType("application/problem+json");
+            response.getWriter().write("{\"title\":\"Limite de requisições excedido\",\"status\":429}"); return;
+        }
+        if (isLockedOut(clientId)) {
+            response.setStatus(429); response.setContentType("application/problem+json");
+            response.getWriter().write("{\"title\":\"Bloqueado temporariamente\",\"status\":429}"); return;
+        }
         String token = System.getenv("SWISSKNIFE_API_TOKEN");
         if (token != null && !token.isBlank()) {
             String actual = request.getHeader("Authorization");
             if (actual == null || !MessageDigest.isEqual(("Bearer " + token).getBytes(StandardCharsets.UTF_8),
                 actual.getBytes(StandardCharsets.UTF_8))) {
+                registerFailure(clientId);
                 response.setStatus(401); response.setContentType("application/problem+json");
                 response.getWriter().write("{\"title\":\"Não autorizado\",\"status\":401}"); return;
             }
+            clearFailures(clientId);
         }
         chain.doFilter(request, response);
     }
+    private static boolean checkRateLimit(String clientId) {
+        long now = System.currentTimeMillis();
+        RateWindow window = RATE.computeIfAbsent(clientId, ignored -> new RateWindow());
+        synchronized (window) {
+            if (now - window.windowStart > 60_000) { window.windowStart = now; window.count = 0; }
+            window.count++;
+            return window.count <= RATE_LIMIT_PER_MINUTE;
+        }
+    }
+    private static boolean isLockedOut(String clientId) {
+        FailureWindow window = FAILURES.get(clientId);
+        return window != null && window.lockedUntil > System.currentTimeMillis();
+    }
+    private static void registerFailure(String clientId) {
+        FailureWindow window = FAILURES.computeIfAbsent(clientId, ignored -> new FailureWindow());
+        synchronized (window) {
+            window.count++;
+            if (window.count >= MAX_ATTEMPTS) window.lockedUntil = System.currentTimeMillis() + LOCKOUT_MILLIS;
+        }
+    }
+    private static void clearFailures(String clientId) { FAILURES.remove(clientId); }
 }
 
 @RestControllerAdvice
