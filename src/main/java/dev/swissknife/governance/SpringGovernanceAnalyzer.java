@@ -21,12 +21,21 @@ public final class SpringGovernanceAnalyzer {
             if (code.contains("RestTemplate") && !code.matches("(?s).*(setConnectTimeout|connectTimeout).*"))
                 findings.add(new Finding("HTTP_TIMEOUT_NOT_VISIBLE", "LOW",
                     root.relativize(file).toString(), "Cliente HTTP sem timeout visível."));
+            if (code.matches("(?s).*@CrossOrigin\\s*\\([^)]*origins\\s*=\\s*[\"']\\*[\"'].*"))
+                findings.add(new Finding("CORS_WILDCARD", "HIGH", root.relativize(file).toString(),
+                    "@CrossOrigin com origins=\"*\" permite qualquer origem."));
+            Matcher scheduled = Pattern.compile("@Scheduled[^\\n]*\\n\\s*(?:public|private|protected)?\\s*\\S+\\s+(\\w+)\\s*\\(").matcher(code);
+            while (scheduled.find()) components.add(new Component("SCHEDULED_TASK", scheduled.group(1), root.relativize(file).toString()));
+            Matcher listener = Pattern.compile("@(EventListener|KafkaListener|RabbitListener)[^\\n]*\\n\\s*(?:public|private|protected)?\\s*\\S+\\s+(\\w+)\\s*\\(").matcher(code);
+            while (listener.find()) components.add(new Component("LISTENER_" + listener.group(1).toUpperCase(Locale.ROOT), listener.group(2), root.relativize(file).toString()));
         }
         List<String> properties = new ArrayList<>();
-        for (Path file : FilesEx.walk(root, p -> {
+        Set<String> activeProfiles = new LinkedHashSet<>();
+        List<Path> propertyFiles = FilesEx.walk(root, p -> {
             String n = p.getFileName().toString();
             return n.startsWith("application") && (n.endsWith(".yml") || n.endsWith(".yaml") || n.endsWith(".properties"));
-        })) {
+        });
+        for (Path file : propertyFiles) {
             String content = Files.readString(file);
             properties.add(root.relativize(file).toString());
             if (content.matches("(?s).*open-in-view\\s*[:=]\\s*true.*"))
@@ -38,8 +47,37 @@ public final class SpringGovernanceAnalyzer {
             if (content.matches("(?s).*include\\s*:\\s*[\"']?\\*[\"']?.*"))
                 findings.add(new Finding("ACTUATOR_ALL_EXPOSED", "HIGH", root.relativize(file).toString(),
                     "Todos os endpoints Actuator foram expostos."));
+            if (content.contains("jdbc:") && !content.contains("maximum-pool-size") && !content.contains("maximumPoolSize"))
+                findings.add(new Finding("DATASOURCE_POOL_NOT_CONFIGURED", "LOW", root.relativize(file).toString(),
+                    "DataSource configurado sem tamanho de pool explícito (HikariCP)."));
+            findDuplicateProperties(root, file, content, findings);
+            Matcher profileMatcher = Pattern.compile("(?m)^\\s*(?:spring\\.)?profiles\\.active\\s*[:=]\\s*(.+)$").matcher(content);
+            while (profileMatcher.find())
+                for (String profile : profileMatcher.group(1).split(","))
+                    activeProfiles.add(profile.trim().replaceAll("[\"']", ""));
+        }
+        for (String profile : activeProfiles) {
+            if (profile.isBlank()) continue;
+            boolean exists = propertyFiles.stream().anyMatch(p -> p.getFileName().toString().contains("-" + profile + "."));
+            if (!exists) findings.add(new Finding("PROFILE_FILE_MISSING", "MEDIUM", profile,
+                "Profile '" + profile + "' referenciado, mas nenhum application-" + profile + ".yml/properties encontrado."));
         }
         return new Report(components, endpoints, properties, findings);
+    }
+
+    private void findDuplicateProperties(Path root, Path file, String content, List<Finding> findings) {
+        if (!file.getFileName().toString().endsWith(".properties")) return;
+        Map<String, Integer> seen = new LinkedHashMap<>();
+        for (String line : content.lines().toList()) {
+            String trimmed = line.strip();
+            if (trimmed.isEmpty() || trimmed.startsWith("#")) continue;
+            int equals = trimmed.indexOf('=');
+            if (equals < 1) continue;
+            String key = trimmed.substring(0, equals).trim();
+            seen.merge(key, 1, Integer::sum);
+        }
+        seen.forEach((key, count) -> { if (count > 1) findings.add(new Finding("PROPERTY_DUPLICATED", "LOW",
+            root.relativize(file).toString(), "Propriedade '" + key + "' declarada " + count + " vezes.")); });
     }
 
     private void catalog(Path root, Path file, String code, List<Component> components, List<Endpoint> endpoints) {
