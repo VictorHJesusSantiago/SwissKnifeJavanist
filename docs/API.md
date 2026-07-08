@@ -17,8 +17,12 @@ Authorization: Bearer seu-token
 - `GET /api/v1/vulnerabilities/{id}`
 - `POST /api/v1/vulnerabilities`
 - `PUT /api/v1/vulnerabilities/{id}`
+- `PATCH /api/v1/vulnerabilities/{id}/status`
 - `DELETE /api/v1/vulnerabilities/{id}`
 - `GET /api/v1/dashboard`
+
+Filtros da listagem: `status`, `severity`, `component`, `q` e `overdue`.
+O endpoint de status valida o fluxo OPEN → TRIAGED/IN_PROGRESS → RESOLVED.
 
 Payload mínimo:
 
@@ -37,8 +41,13 @@ Severidades aceitas: `LOW`, `MEDIUM`, `HIGH` e `CRITICAL`.
 - `GET /api/v1/assets/{id}`
 - `POST /api/v1/assets`
 - `PUT /api/v1/assets/{id}`
+- `PATCH /api/v1/assets/{id}/status`
 - `DELETE /api/v1/assets/{id}`
 - `GET /api/v1/inventory`
+
+Filtros da listagem: `status`, `type`, `assignedTo` e `q`. A transição para
+`IN_USE` exige `assignedTo`; estados terminais e transições inválidas retornam
+HTTP 400.
 
 Payload mínimo:
 
