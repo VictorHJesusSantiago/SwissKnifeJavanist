@@ -12,6 +12,26 @@ import java.util.*;
 public final class IntegrationDispatcher {
     private final HttpClient client = HttpClient.newBuilder().connectTimeout(Duration.ofSeconds(10)).build();
 
+    /** Envia vários findings (JSON array) para o mesmo destino, um dispatch por item. */
+    @SuppressWarnings("unchecked")
+    public List<DispatchResult> dispatchBatch(Path configuration, Path payloadsFile, boolean dryRun)
+        throws IOException, InterruptedException {
+        Object parsed = Json.parse(Files.readString(payloadsFile));
+        if (!(parsed instanceof List<?> items)) throw new IllegalArgumentException("dispatchBatch exige um array JSON de findings");
+        List<DispatchResult> results = new ArrayList<>();
+        Properties properties = new Properties();
+        try (var reader = Files.newBufferedReader(configuration)) { properties.load(reader); }
+        String provider = properties.getProperty("provider", "webhook").toLowerCase(Locale.ROOT);
+        for (Object item : items) {
+            if (!(item instanceof Map<?, ?> map)) continue;
+            Map<String, Object> payload = (Map<String, Object>) map;
+            Request request = request(provider, properties, payload, dryRun);
+            results.add(execute(properties, provider, request, dryRun));
+            if (!dryRun && items.size() > 1) Thread.sleep(200);
+        }
+        return results;
+    }
+
     public DispatchResult dispatch(Path configuration, Path payloadFile, boolean dryRun)
         throws IOException, InterruptedException {
         Properties properties = new Properties();
@@ -19,6 +39,11 @@ public final class IntegrationDispatcher {
         String provider = properties.getProperty("provider", "webhook").toLowerCase(Locale.ROOT);
         Map<String, Object> payload = Json.object(Files.readString(payloadFile));
         Request request = request(provider, properties, payload, dryRun);
+        return execute(properties, provider, request, dryRun);
+    }
+
+    private DispatchResult execute(Properties properties, String provider, Request request, boolean dryRun)
+        throws IOException, InterruptedException {
         if (dryRun) return new DispatchResult(provider, request.url(), request.method(),
             redact(request.headers()), redactBody(request.body()), 0, "", true, Instant.now().toString());
         HttpRequest.Builder builder = HttpRequest.newBuilder(URI.create(request.url()))
@@ -85,7 +110,20 @@ public final class IntegrationDispatcher {
         };
         String bodyText = Json.stringify(body);
         if (provider.equals("azure-boards")) headers.put("Content-Type", "application/json-patch+json");
+        String signingSecretEnv = p.getProperty("signingSecretEnv");
+        if (signingSecretEnv != null && !signingSecretEnv.isBlank()) {
+            String secret = System.getenv(signingSecretEnv);
+            if (secret == null && !dryRun) throw new IllegalArgumentException("Variável de assinatura ausente: " + signingSecretEnv);
+            headers.put("X-Signature-256", "sha256=" + (secret == null ? "<sem-assinatura-em-dry-run>" : hmac(secret, bodyText)));
+        }
         return new Request(url, p.getProperty("method", "POST").toUpperCase(Locale.ROOT), headers, bodyText);
+    }
+    private String hmac(String key, String body) {
+        try {
+            var mac = javax.crypto.Mac.getInstance("HmacSHA256");
+            mac.init(new javax.crypto.spec.SecretKeySpec(key.getBytes(java.nio.charset.StandardCharsets.UTF_8), "HmacSHA256"));
+            return HexFormat.of().formatHex(mac.doFinal(body.getBytes(java.nio.charset.StandardCharsets.UTF_8)));
+        } catch (Exception e) { throw new IllegalStateException(e); }
     }
 
     private String message(Map<String, Object> payload) {
