@@ -7,3 +7,4 @@ out/
 intellij-plugin/.gradle/
 intellij-plugin/build/
 spring-backends/**/target/
+.swissknife/
