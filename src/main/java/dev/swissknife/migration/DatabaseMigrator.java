@@ -363,9 +363,23 @@ public final class DatabaseMigrator {
     private void updateDigest(MessageDigest digest, Object value) {
         digest.update(String.valueOf(value).getBytes(StandardCharsets.UTF_8)); digest.update((byte) 0);
     }
+    private static final Set<String> FORBIDDEN_WHERE_TOKENS = Set.of(
+        "SELECT", "INSERT", "UPDATE", "DELETE", "UNION", "INTO", "DROP", "ALTER", "CREATE",
+        "TRUNCATE", "EXEC", "EXECUTE", "CALL", "GRANT", "REVOKE", "MERGE");
+    /**
+     * Tokeniza o WHERE com o mesmo parser usado para SQL arbitrário (SqlTokenizer), em vez de uma
+     * blacklist de substrings — isso rejeita subqueries e statements encadeados mesmo quando ofuscados
+     * com comentários/espaços, e evita falsos positivos para esses termos dentro de literais de string.
+     */
     private String safeWhere(String where) {
-        if (where.contains(";") || where.contains("--") || where.contains("/*"))
-            throw new IllegalArgumentException("WHERE contém tokens não permitidos");
+        for (var token : new dev.swissknife.sql.SqlTokenizer().tokenize(where)) {
+            String text = token.text().toUpperCase(Locale.ROOT);
+            boolean forbiddenWord = (token.type() == dev.swissknife.sql.SqlTokenizer.Type.KEYWORD
+                || token.type() == dev.swissknife.sql.SqlTokenizer.Type.IDENTIFIER) && FORBIDDEN_WHERE_TOKENS.contains(text);
+            boolean statementSeparator = token.type() == dev.swissknife.sql.SqlTokenizer.Type.PUNCTUATION && text.equals(";");
+            if (forbiddenWord || statementSeparator)
+                throw new IllegalArgumentException("WHERE contém tokens não permitidos: " + token.text());
+        }
         return where;
     }
     private String required(Properties p, String key) {
