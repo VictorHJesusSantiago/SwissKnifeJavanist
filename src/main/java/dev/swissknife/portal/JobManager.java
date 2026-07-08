@@ -45,6 +45,17 @@ public final class JobManager implements AutoCloseable {
             .limit(Math.max(1,Math.min(limit,1000))).map(MutableJob::snapshot).toList();
     }
     public Optional<Job> find(String id){MutableJob job=jobs.get(id);return job==null?Optional.empty():Optional.of(job.snapshot());}
+    /** Extrai o caminho do artefato gerado por um job concluído (campo "output" do resultado), se houver. */
+    public Optional<Path> artifactPath(String id){
+        MutableJob job=jobs.get(id);
+        if(job==null||job.state!=State.COMPLETED||job.result==null)return Optional.empty();
+        Object normalized=dev.swissknife.util.Json.parse(dev.swissknife.util.Json.stringify(job.result));
+        if(!(normalized instanceof Map<?,?> map))return Optional.empty();
+        Object output=map.get("output");
+        if(output==null)return Optional.empty();
+        Path candidate=Path.of(String.valueOf(output));
+        return java.nio.file.Files.isRegularFile(candidate)?Optional.of(candidate):Optional.empty();
+    }
     public Job cancel(String id){
         MutableJob job=jobs.get(id);if(job==null)throw new IllegalArgumentException("Job não encontrado: "+id);
         synchronized(job){

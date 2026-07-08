@@ -37,6 +37,7 @@ public final class PortalServer {
         server.createContext("/service-worker.js", e -> text(e, "text/javascript", SERVICE_WORKER));
         server.createContext("/api/status", e -> HttpSupport.json(e, 200, status()));
         server.createContext("/api/jobs",HttpSupport.authenticated(this::jobApi));
+        server.createContext("/api/jobs-events",HttpSupport.authenticated(this::jobEvents));
         server.createContext("/api/metrics",HttpSupport.authenticated(e->HttpSupport.json(e,200,jobs.metrics())));
         server.createContext("/metrics",HttpSupport.authenticated(e->text(e,"text/plain; version=0.0.4; charset=utf-8",prometheus())));
         server.createContext("/health", e -> HttpSupport.json(e, 200, Map.of("status", "UP", "service", "portal")));
@@ -83,6 +84,7 @@ public final class PortalServer {
                 case"GET"->{
                     if(suffix.isBlank())HttpSupport.json(exchange,200,jobs.list(
                         parseInt(HttpSupport.query(exchange).get("limit"),100),HttpSupport.query(exchange).get("state")));
+                    else if(suffix.endsWith("/artifact")) artifact(exchange,suffix.substring(0,suffix.length()-"/artifact".length()));
                     else jobs.find(suffix).ifPresentOrElse(job->send(exchange,200,job),()->send(exchange,404,Map.of("error","Job não encontrado")));
                 }
                 case"POST"->{
@@ -99,6 +101,34 @@ public final class PortalServer {
                 default->HttpSupport.json(exchange,405,Map.of("error","Método não permitido"));
             }
         }catch(IllegalArgumentException e){HttpSupport.json(exchange,400,Map.of("error",e.getMessage()));}
+    }
+    private void artifact(HttpExchange exchange,String jobId) throws IOException{
+        var path=jobs.artifactPath(jobId);
+        if(path.isEmpty()){HttpSupport.json(exchange,404,Map.of("error","Artefato não encontrado para este job"));return;}
+        byte[] bytes=Files.readAllBytes(path.get());
+        String name=path.get().getFileName().toString().toLowerCase(Locale.ROOT);
+        String contentType=name.endsWith(".html")?"text/html; charset=utf-8":name.endsWith(".json")?"application/json"
+            :name.endsWith(".md")?"text/markdown; charset=utf-8":name.endsWith(".xml")||name.endsWith(".mmd")?"text/plain; charset=utf-8"
+            :"application/octet-stream";
+        exchange.getResponseHeaders().set("Content-Type",contentType);
+        exchange.getResponseHeaders().set("Content-Disposition","inline; filename=\""+path.get().getFileName()+"\"");
+        exchange.sendResponseHeaders(200,bytes.length);
+        try(var out=exchange.getResponseBody()){out.write(bytes);}
+    }
+    /** Atualização em tempo real da lista de jobs via Server-Sent Events (substitui o polling). */
+    private void jobEvents(HttpExchange exchange) throws IOException{
+        exchange.getResponseHeaders().set("Content-Type","text/event-stream; charset=utf-8");
+        exchange.getResponseHeaders().set("Cache-Control","no-cache");
+        exchange.sendResponseHeaders(200,0);
+        try(var out=exchange.getResponseBody()){
+            long deadline=System.currentTimeMillis()+Duration.ofMinutes(10).toMillis();
+            while(System.currentTimeMillis()<deadline){
+                String payload=Json.stringify(jobs.list(50,null));
+                out.write(("data: "+payload+"\n\n").getBytes(StandardCharsets.UTF_8));
+                out.flush();
+                try{Thread.sleep(2000);}catch(InterruptedException e){Thread.currentThread().interrupt();return;}
+            }
+        } catch(IOException clientDisconnected){ /* cliente fechou a conexão; encerra o stream silenciosamente */ }
     }
     private void send(HttpExchange exchange,int status,Object value){try{HttpSupport.json(exchange,status,value);}catch(IOException e){throw new RuntimeException(e);}}
     private int parseInt(String value,int fallback){try{return value==null?fallback:Integer.parseInt(value);}catch(Exception e){return fallback;}}
@@ -137,12 +167,16 @@ public final class PortalServer {
         <label>Ferramenta<select id="tool"><option value="quality">Qualidade</option><option value="security-scan">Segurança</option>
         <option value="dependency-audit">Dependências/SBOM</option><option value="spring-audit">Spring Boot</option>
         <option value="test-audit">Testes</option><option value="release-readiness">Prontidão de release</option>
-        <option value="debt">Dívida técnica</option><option value="modernize">Modernização</option></select></label>
+        <option value="debt">Dívida técnica</option><option value="modernize">Modernização</option>
+        <option value="detect-pii">Detectar PII</option><option value="contract-test">Teste de contrato</option>
+        <option value="slow-query-file">Analisar SQL (lote)</option><option value="jvm-diagnose">Diagnóstico JVM</option></select></label>
         <label>Caminho ou argumento principal<input id="target" value="." required></label>
         <label>Token da API (mantido somente nesta aba)<input id="api-token" type="password" autocomplete="off"></label>
         <button type="submit" class="primary">Executar</button><span id="feedback" role="status"></span></form></section>
         <section aria-labelledby="jobs-title"><div class="section-title"><h2 id="jobs-title">Execuções</h2>
-        <button id="refresh">Atualizar</button></div><div id="jobs" class="jobs" aria-live="polite"></div>
+        <button id="refresh">Atualizar</button></div>
+        <input id="job-search" placeholder="Filtrar execuções por comando" aria-label="Filtrar execuções">
+        <div id="jobs" class="jobs" aria-live="polite"></div>
         <pre id="result" tabindex="0" hidden></pre></section>
         <section><h2>Ferramentas</h2><div class="grid tools">
         <article class="card"><b>Qualidade</b><code>swissknife quality .</code></article>
@@ -191,12 +225,19 @@ public final class PortalServer {
           return token?{'Authorization':'Bearer '+token}:{}};
         document.querySelector('#api-token').value=sessionStorage.apiToken||'';
         const escapeHtml=value=>String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        let lastJobs=[];
+        function renderJobs(){
+          const filter=(document.querySelector('#job-search').value||'').toLowerCase();
+          const data=lastJobs.filter(job=>job.command.join(' ').toLowerCase().includes(filter));
+          jobs.innerHTML=data.length?data.map(job=>`<article class="job" data-id="${job.id}">
+          <div><b>${escapeHtml(job.command.join(' '))}</b><small>${job.state} · ${job.durationMs} ms · ${escapeHtml(job.message||job.error||'')}</small></div>
+          <div><button data-view="${job.id}">Ver</button>${job.state==='COMPLETED'?` <a href="/api/jobs/${job.id}/artifact" target="_blank" data-artifact="${job.id}">Artefato</a>`:''}${['QUEUED','RUNNING'].includes(job.state)?` <button data-cancel="${job.id}">Cancelar</button>`:''}</div></article>`).join(''):
+          '<p>Nenhuma execução registrada.</p>';
+        }
         async function loadJobs(){
           try{const response=await fetch('/api/jobs?limit=50',{headers:auth()});if(!response.ok)throw new Error('HTTP '+response.status);
-          const data=await response.json();jobs.innerHTML=data.length?data.map(job=>`<article class="job" data-id="${job.id}">
-          <div><b>${escapeHtml(job.command.join(' '))}</b><small>${job.state} · ${job.durationMs} ms · ${escapeHtml(job.message||job.error||'')}</small></div>
-          <div><button data-view="${job.id}">Ver</button>${['QUEUED','RUNNING'].includes(job.state)?` <button data-cancel="${job.id}">Cancelar</button>`:''}</div></article>`).join(''):
-          '<p>Nenhuma execução registrada.</p>';}catch(error){jobs.innerHTML='<p>Não autorizado ou serviço indisponível.</p>'}}
+          lastJobs=await response.json();renderJobs();}catch(error){jobs.innerHTML='<p>Não autorizado ou serviço indisponível.</p>'}}
+        document.querySelector('#job-search').addEventListener('input',renderJobs);
         document.querySelector('#job-form').addEventListener('submit',async event=>{event.preventDefault();feedback.textContent='Enviando…';
           const response=await fetch('/api/jobs',{method:'POST',headers:{'Content-Type':'application/json',...auth()},
           body:JSON.stringify({command:[tool.value,target.value]})});const data=await response.json();
@@ -204,7 +245,24 @@ public final class PortalServer {
         jobs.addEventListener('click',async event=>{const view=event.target.dataset.view,cancel=event.target.dataset.cancel;
           if(view){const response=await fetch('/api/jobs/'+view,{headers:auth()});const data=await response.json();result.hidden=false;result.textContent=JSON.stringify(data,null,2)}
           if(cancel){await fetch('/api/jobs/'+cancel,{method:'DELETE',headers:auth()});await loadJobs()}});
-        refresh.onclick=loadJobs;setInterval(loadJobs,5000);loadJobs();
+        refresh.onclick=loadJobs;loadJobs();
+        async function streamJobs(){
+          try{
+            const response=await fetch('/api/jobs-events',{headers:auth()});
+            if(!response.ok||!response.body)throw new Error('SSE indisponível');
+            const reader=response.body.getReader();const decoder=new TextDecoder();let buffer='';
+            while(true){
+              const {value,done}=await reader.read();if(done)break;
+              buffer+=decoder.decode(value,{stream:true});
+              let index;while((index=buffer.indexOf('\n\n'))>=0){
+                const chunk=buffer.slice(0,index);buffer=buffer.slice(index+2);
+                if(chunk.startsWith('data: ')){lastJobs=JSON.parse(chunk.slice(6));renderJobs()}
+              }
+            }
+          }catch(error){/* volta para polling */}
+          setInterval(loadJobs,5000);
+        }
+        streamJobs();
         if('serviceWorker' in navigator)navigator.serviceWorker.register('/service-worker.js');
         """;
     private static final String MANIFEST = """
