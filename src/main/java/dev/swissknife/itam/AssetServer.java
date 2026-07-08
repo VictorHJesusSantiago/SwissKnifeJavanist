@@ -18,7 +18,7 @@ public final class AssetServer {
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
         server.createContext("/health", e -> HttpSupport.json(e, 200, Map.of("status", "UP", "service", "itam")));
-        server.createContext("/ready", e -> HttpSupport.json(e, 200, Map.of("status", "READY", "records", store.all().size())));
+        server.createContext("/ready", e -> HttpSupport.json(e, 200, Map.of("status", "READY", "records", store.count())));
         server.createContext("/version", e -> HttpSupport.json(e, 200, Map.of("service", "itam", "apiVersion", "v1")));
         server.createContext("/api/v1/assets", HttpSupport.authenticated(this::handle));
         server.createContext("/api/v1/inventory", HttpSupport.authenticated(this::inventory));
@@ -62,12 +62,13 @@ public final class AssetServer {
     private void inventory(HttpExchange e) throws IOException {
         Map<String, Long> types = new TreeMap<>(), statuses = new TreeMap<>();
         double value = 0;
-        for (var asset : store.all()) {
+        var assets = store.all();
+        for (var asset : assets) {
             types.merge(String.valueOf(asset.getOrDefault("type", "OTHER")), 1L, Long::sum);
             statuses.merge(String.valueOf(asset.getOrDefault("status", "UNKNOWN")), 1L, Long::sum);
             if (asset.get("purchaseValue") instanceof Number n) value += n.doubleValue();
         }
-        HttpSupport.json(e, 200, Map.of("total", store.all().size(), "totalPurchaseValue", value, "byType", types, "byStatus", statuses));
+        HttpSupport.json(e, 200, Map.of("total", assets.size(), "totalPurchaseValue", value, "byType", types, "byStatus", statuses));
     }
     private void validate(Map<String, Object> asset) {
         for (var field : List.of("tag", "name", "type"))
