@@ -67,6 +67,8 @@ public final class DatabaseMigrator {
         config.columnMappings().forEach((from, to) -> { validateIdentifier(from); validateIdentifier(to); });
         long started = System.nanoTime();
         List<RowError> errors = new ArrayList<>();
+        int resumedFrom = config.resume() ? readCheckpoint(config.checkpointFile()) : 0;
+        int toSkip = resumedFrom;
         int read = 0, written = 0, skipped = 0, batches = 0;
         String checksum;
         try {
@@ -77,7 +79,9 @@ public final class DatabaseMigrator {
                     (config.whereClause().isBlank() ? "" : " WHERE " + safeWhere(config.whereClause()));
                 if (config.limit() > 0) source.setReadOnly(true);
                 target.setAutoCommit(false);
-                if (config.truncateTarget() && !config.dryRun())
+                if (config.createTarget() && !config.dryRun())
+                    createTargetIfMissing(source, target, config);
+                if (config.truncateTarget() && !config.dryRun() && resumedFrom == 0)
                     try (Statement statement = target.createStatement()) { statement.executeUpdate("DELETE FROM " + config.targetTable()); }
                 try (Statement statement = source.createStatement()) {
                     statement.setFetchSize(config.fetchSize());
@@ -90,6 +94,7 @@ public final class DatabaseMigrator {
                             return new AdvancedReport(0, 0, 0, 0, mappings.size(), 0, List.of(),
                                 HexFormat.of().formatHex(digest.digest()), true, selectSql, insertSql, 0);
                         }
+                        while (toSkip > 0 && rows.next()) toSkip--;
                         try (PreparedStatement insert = target.prepareStatement(insertSql)) {
                             while (rows.next()) {
                                 read++;
@@ -101,22 +106,22 @@ public final class DatabaseMigrator {
                                     }
                                     insert.addBatch();
                                     if (read % config.batchSize() == 0) {
-                                        BatchResult result = executeBatch(insert, config.conflictPolicy(), read, errors);
+                                        BatchResult result = executeBatchWithRetry(insert, config, read, errors);
                                         written += result.written(); skipped += result.skipped(); batches++;
-                                        checkpoint(config, read, written, digest);
+                                        checkpoint(config, resumedFrom + read, written, digest);
                                     }
                                 } catch (Exception e) {
                                     if (config.errorPolicy().equalsIgnoreCase("FAIL")) throw e;
-                                    errors.add(new RowError(read, e.getMessage())); skipped++;
+                                    errors.add(new RowError(resumedFrom + read, e.getMessage())); skipped++;
                                 }
                             }
-                            BatchResult result = executeBatch(insert, config.conflictPolicy(), read, errors);
+                            BatchResult result = executeBatchWithRetry(insert, config, read, errors);
                             written += result.written(); skipped += result.skipped(); batches++;
                             target.commit();
                         } catch (Exception e) {
                             target.rollback();
                             if (e instanceof SQLException sql) throw sql;
-                            throw new SQLException("Falha ao transformar linha " + read, e);
+                            throw new SQLException("Falha ao transformar linha " + (resumedFrom + read), e);
                         }
                     }
                 }
@@ -126,7 +131,7 @@ public final class DatabaseMigrator {
         if (config.rejectFile() != null && !errors.isEmpty())
             FilesEx.write(config.rejectFile(), errors.stream().map(error -> Json.stringify(error))
                 .reduce((a,b)->a+"\n"+b).orElse("") + "\n");
-        return new AdvancedReport(read, written, skipped, batches, config.columnMappings().size(),
+        return new AdvancedReport(resumedFrom + read, written, skipped, batches, config.columnMappings().size(),
             Duration.ofNanos(System.nanoTime() - started).toMillis(), errors, checksum, false,
             "SELECT", "INSERT", written == 0 ? 0 : written * 1000.0 /
                 Math.max(1, Duration.ofNanos(System.nanoTime() - started).toMillis()));
@@ -149,7 +154,9 @@ public final class DatabaseMigrator {
             p.getProperty("where", ""), mappings, transforms, p.getProperty("conflictPolicy", "FAIL"),
             p.getProperty("errorPolicy", "FAIL"), Boolean.parseBoolean(p.getProperty("truncateTarget", "false")),
             Boolean.parseBoolean(p.getProperty("dryRun", "false")),
-            path(p.getProperty("checkpointFile")), path(p.getProperty("rejectFile")));
+            path(p.getProperty("checkpointFile")), path(p.getProperty("rejectFile")),
+            Boolean.parseBoolean(p.getProperty("resume", "false")),
+            Boolean.parseBoolean(p.getProperty("createTarget", "false")), integer(p, "retries", 0));
     }
 
     public ExportReport export(ConnectionConfig connection, String table, String where,
@@ -214,14 +221,24 @@ public final class DatabaseMigrator {
         }
     }
     private List<Mapping> mappings(ResultSetMetaData metadata, AdvancedConfig config) throws SQLException {
+        // Bancos como H2/Oracle/DB2 reportam nomes de coluna em MAIÚSCULAS por padrão via JDBC,
+        // mesmo quando o usuário digitou o mapeamento/transformação em minúsculas na configuração;
+        // por isso a busca precisa ser case-insensitive, nunca getOrDefault() direto.
+        Map<String, String> columnMappings = caseInsensitive(config.columnMappings());
+        Map<String, String> transforms = caseInsensitive(config.transforms());
         List<Mapping> result = new ArrayList<>();
         for (int i = 1; i <= metadata.getColumnCount(); i++) {
             String source = metadata.getColumnLabel(i);
-            String target = config.columnMappings().getOrDefault(source, source);
+            String target = columnMappings.getOrDefault(source, source);
             if (target.equals("-") || target.equalsIgnoreCase("ignore")) continue;
             validateIdentifier(target);
-            result.add(new Mapping(i, source, target, config.transforms().getOrDefault(source, "keep")));
+            result.add(new Mapping(i, source, target, transforms.getOrDefault(source, "keep")));
         }
+        return result;
+    }
+    private Map<String, String> caseInsensitive(Map<String, String> source) {
+        Map<String, String> result = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        result.putAll(source);
         return result;
     }
     private String insertSql(String table, List<Mapping> mappings) {
@@ -241,6 +258,23 @@ public final class DatabaseMigrator {
         if (strategy.startsWith("constant:")) return mapping.transform().substring(9);
         throw new IllegalArgumentException("Transformação desconhecida em " + mapping.source() + ": " + mapping.transform());
     }
+    private BatchResult executeBatchWithRetry(PreparedStatement statement, AdvancedConfig config, int row,
+                                              List<RowError> errors) throws SQLException {
+        int attempts = Math.max(1, config.retries() + 1);
+        SQLException last = null;
+        for (int attempt = 1; attempt <= attempts; attempt++) {
+            try {
+                return executeBatch(statement, config.conflictPolicy(), row, errors);
+            } catch (SQLTransientException | SQLRecoverableException e) {
+                last = e;
+                if (attempt < attempts) {
+                    try { Thread.sleep(Math.min(2_000, 100L << attempt)); }
+                    catch (InterruptedException interrupted) { Thread.currentThread().interrupt(); throw e; }
+                }
+            }
+        }
+        throw last;
+    }
     private BatchResult executeBatch(PreparedStatement statement, String conflictPolicy, int row,
                                      List<RowError> errors) throws SQLException {
         try {
@@ -252,6 +286,73 @@ public final class DatabaseMigrator {
             errors.add(new RowError(row, "Lote ignorado por conflito: " + e.getMessage()));
             statement.clearBatch();
             return new BatchResult(0, Math.max(1, e.getUpdateCounts().length));
+        }
+    }
+    private int readCheckpoint(Path checkpointFile) {
+        if (checkpointFile == null || !Files.isRegularFile(checkpointFile)) return 0;
+        try {
+            Object parsed = Json.parse(Files.readString(checkpointFile));
+            if (parsed instanceof Map<?, ?> map && map.get("read") instanceof Number n) return n.intValue();
+        } catch (Exception ignored) { /* checkpoint corrompido é tratado como ausente */ }
+        return 0;
+    }
+    private void createTargetIfMissing(Connection source, Connection target, AdvancedConfig config) throws SQLException {
+        if (resolveTableName(target.getMetaData(), config.targetTable()) != null) return;
+        String sourceTableActual = resolveTableName(source.getMetaData(), config.sourceTable());
+        if (sourceTableActual == null)
+            throw new IllegalArgumentException("Tabela de origem não encontrada no banco: " + config.sourceTable());
+        Map<String, String> columnMappings = caseInsensitive(config.columnMappings());
+        try (ResultSet sourceColumns = source.getMetaData().getColumns(null, null, sourceTableActual, null)) {
+            List<String> definitions = new ArrayList<>();
+            while (sourceColumns.next()) {
+                String sourceName = sourceColumns.getString("COLUMN_NAME");
+                String targetName = columnMappings.getOrDefault(sourceName, sourceName);
+                if (targetName.equals("-") || targetName.equalsIgnoreCase("ignore")) continue;
+                validateIdentifier(targetName);
+                definitions.add(targetName + " " + genericSqlType(sourceColumns.getInt("DATA_TYPE"), sourceColumns.getInt("COLUMN_SIZE")));
+            }
+            if (definitions.isEmpty()) throw new IllegalArgumentException("Não foi possível ler colunas de " + config.sourceTable());
+            try (Statement statement = target.createStatement()) {
+                statement.executeUpdate("CREATE TABLE " + config.targetTable() + " (" + String.join(", ", definitions) + ")");
+            }
+        }
+    }
+    /**
+     * Resolve o nome real da tabela nos metadados JDBC tentando o nome exato, depois MAIÚSCULO e
+     * minúsculo — necessário porque muitos bancos (H2, Oracle) armazenam identificadores não citados
+     * em maiúsculas, enquanto o usuário costuma digitar o nome em minúsculas na configuração.
+     */
+    private String resolveTableName(DatabaseMetaData meta, String requestedName) throws SQLException {
+        for (String candidate : List.of(requestedName, requestedName.toUpperCase(Locale.ROOT), requestedName.toLowerCase(Locale.ROOT))) {
+            try (ResultSet tables = meta.getTables(null, null, candidate, null)) {
+                if (tables.next()) return candidate;
+            }
+        }
+        return null;
+    }
+    private String genericSqlType(int jdbcType, int size) {
+        return switch (jdbcType) {
+            case Types.INTEGER, Types.SMALLINT, Types.TINYINT -> "INTEGER";
+            case Types.BIGINT -> "BIGINT";
+            case Types.DECIMAL, Types.NUMERIC -> "DECIMAL";
+            case Types.FLOAT, Types.REAL, Types.DOUBLE -> "DOUBLE";
+            case Types.BOOLEAN, Types.BIT -> "BOOLEAN";
+            case Types.DATE -> "DATE";
+            case Types.TIME -> "TIME";
+            case Types.TIMESTAMP -> "TIMESTAMP";
+            case Types.CLOB, Types.LONGVARCHAR -> "CLOB";
+            case Types.BLOB, Types.BINARY, Types.VARBINARY, Types.LONGVARBINARY -> "BLOB";
+            default -> "VARCHAR(" + Math.max(1, Math.min(size, 4000)) + ")";
+        };
+    }
+    /** Compara a contagem de linhas entre origem e destino após uma migração. */
+    public VerifyReport verify(AdvancedConfig config) throws SQLException {
+        try (Connection source = DriverManager.getConnection(config.sourceUrl(), config.sourceUser(), config.sourcePassword());
+             Connection target = DriverManager.getConnection(config.targetUrl(), config.targetUser(), config.targetPassword())) {
+            String where = config.whereClause().isBlank() ? "" : " WHERE " + safeWhere(config.whereClause());
+            long sourceRows = count(source, config.sourceTable(), where);
+            long targetRows = count(target, config.targetTable(), "");
+            return new VerifyReport(sourceRows, targetRows, sourceRows == targetRows, sourceRows - targetRows);
         }
     }
     private void checkpoint(AdvancedConfig config, int read, int written, MessageDigest digest) throws IOException {
@@ -304,13 +405,25 @@ public final class DatabaseMigrator {
                                  int batchSize, int fetchSize, int limit, String whereClause,
                                  Map<String, String> columnMappings, Map<String, String> transforms,
                                  String conflictPolicy, String errorPolicy, boolean truncateTarget,
-                                 boolean dryRun, Path checkpointFile, Path rejectFile) {
+                                 boolean dryRun, Path checkpointFile, Path rejectFile,
+                                 boolean resume, boolean createTarget, int retries) {
         public AdvancedConfig {
             if (batchSize < 1) batchSize = 500;
             if (fetchSize < 1) fetchSize = batchSize;
             if (whereClause == null) whereClause = "";
+            if (retries < 0) retries = 0;
             columnMappings = columnMappings == null ? Map.of() : Map.copyOf(columnMappings);
             transforms = transforms == null ? Map.of() : Map.copyOf(transforms);
+        }
+        public AdvancedConfig(String sourceUrl, String sourceUser, String sourcePassword, String sourceTable,
+                              String targetUrl, String targetUser, String targetPassword, String targetTable,
+                              int batchSize, int fetchSize, int limit, String whereClause,
+                              Map<String, String> columnMappings, Map<String, String> transforms,
+                              String conflictPolicy, String errorPolicy, boolean truncateTarget,
+                              boolean dryRun, Path checkpointFile, Path rejectFile) {
+            this(sourceUrl, sourceUser, sourcePassword, sourceTable, targetUrl, targetUser, targetPassword,
+                targetTable, batchSize, fetchSize, limit, whereClause, columnMappings, transforms,
+                conflictPolicy, errorPolicy, truncateTarget, dryRun, checkpointFile, rejectFile, false, false, 0);
         }
     }
     private record Mapping(int sourceIndex, String source, String target, String transform) {}
@@ -321,4 +434,5 @@ public final class DatabaseMigrator {
                                  String checksum, boolean dryRun, String selectSql,
                                  String insertSql, double rowsPerSecond) {}
     public record ExportReport(int rows, int columns, Path output, String format) {}
+    public record VerifyReport(long sourceRows, long targetRows, boolean matches, long divergence) {}
 }
