@@ -2,6 +2,7 @@ package dev.swissknife.schema;
 
 import java.io.IOException;
 import java.nio.file.*;
+import java.sql.*;
 import java.time.Instant;
 import java.util.*;
 import java.util.regex.*;
@@ -65,23 +66,88 @@ public final class SchemaComparator {
         return new Schema(tables, sequences, views);
     }
 
-    public Diff compare(Schema desired, Schema actual) {
+    /** Introspecta um banco vivo via JDBC (DatabaseMetaData) e monta o mesmo modelo Schema usado pelo parser de DDL. */
+    public Schema introspect(Connection connection) throws SQLException {
+        DatabaseMetaData meta = connection.getMetaData();
+        Map<String, MutableTable> mutable = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        String catalog = connection.getCatalog();
+        String schemaPattern = connection.getSchema();
+        try (ResultSet tables = meta.getTables(catalog, schemaPattern, "%", new String[]{"TABLE"})) {
+            while (tables.next()) mutable.put(tables.getString("TABLE_NAME"), new MutableTable(tables.getString("TABLE_NAME")));
+        }
+        for (MutableTable table : mutable.values()) {
+            Set<String> primaryKeyColumns = new LinkedHashSet<>();
+            try (ResultSet pk = meta.getPrimaryKeys(catalog, schemaPattern, table.name)) {
+                while (pk.next()) primaryKeyColumns.add(pk.getString("COLUMN_NAME"));
+            }
+            try (ResultSet columns = meta.getColumns(catalog, schemaPattern, table.name, "%")) {
+                while (columns.next()) {
+                    String name = columns.getString("COLUMN_NAME");
+                    String type = columns.getString("TYPE_NAME");
+                    boolean nullable = columns.getInt("NULLABLE") != DatabaseMetaData.columnNoNulls;
+                    String defaultValue = columns.getString("COLUMN_DEF");
+                    boolean identity = "YES".equalsIgnoreCase(columns.getString("IS_AUTOINCREMENT"));
+                    boolean primary = primaryKeyColumns.contains(name);
+                    table.columns.put(name, new Column(name, type, !nullable, defaultValue, primary, false, identity, null));
+                }
+            }
+            if (!primaryKeyColumns.isEmpty())
+                table.constraints.put("pk_" + table.name, new Constraint("pk_" + table.name, "PRIMARY_KEY",
+                    List.copyOf(primaryKeyColumns), null, null, ""));
+            try (ResultSet fk = meta.getImportedKeys(catalog, schemaPattern, table.name)) {
+                while (fk.next()) {
+                    String name = fk.getString("FK_NAME") != null ? fk.getString("FK_NAME") : "fk_" + table.name + "_" + fk.getString("FKCOLUMN_NAME");
+                    table.constraints.put(name, new Constraint(name, "FOREIGN_KEY", List.of(fk.getString("FKCOLUMN_NAME")),
+                        fk.getString("PKTABLE_NAME"), List.of(fk.getString("PKCOLUMN_NAME")), ""));
+                }
+            }
+            try (ResultSet indexes = meta.getIndexInfo(catalog, schemaPattern, table.name, false, true)) {
+                Map<String, List<String>> byName = new LinkedHashMap<>();
+                Map<String, Boolean> uniqueByName = new LinkedHashMap<>();
+                while (indexes.next()) {
+                    String indexName = indexes.getString("INDEX_NAME");
+                    String column = indexes.getString("COLUMN_NAME");
+                    if (indexName == null || column == null) continue;
+                    byName.computeIfAbsent(indexName, k -> new ArrayList<>()).add(column);
+                    uniqueByName.put(indexName, !indexes.getBoolean("NON_UNIQUE"));
+                }
+                byName.forEach((name, cols) -> {
+                    if (name.toLowerCase(Locale.ROOT).startsWith("pk_") || name.equalsIgnoreCase("pk_" + table.name)) return;
+                    table.indexes.put(name, new Index(name, cols, uniqueByName.getOrDefault(name, false),
+                        "CREATE " + (uniqueByName.getOrDefault(name, false) ? "UNIQUE " : "") + "INDEX " + name +
+                            " ON " + table.name + " (" + String.join(", ", cols) + ");"));
+                });
+            }
+        }
+        Map<String, Table> tables = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+        mutable.forEach((name, table) -> tables.put(name, table.freeze()));
+        return new Schema(tables, Map.of(), Map.of());
+    }
+
+    public Diff compare(Schema desired, Schema actual) { return compare(desired, actual, Set.of()); }
+
+    public Diff compare(Schema desired, Schema actual, Set<String> ignoredObjects) {
         List<Change> changes = new ArrayList<>();
         desired.tables().forEach((name, table) -> {
+            if (ignored(ignoredObjects, name)) return;
             Table current = actual.tables().get(name);
             if (current == null) {
                 changes.add(change("CREATE_TABLE", name, create(table), "DROP TABLE " + name + ";", false, "Estrutura ausente"));
                 return;
             }
-            table.columns().forEach((columnName, column) -> compareColumn(name, column, current.columns().get(columnName), changes));
+            table.columns().forEach((columnName, column) -> {
+                if (!ignored(ignoredObjects, name + "." + columnName))
+                    compareColumn(name, column, current.columns().get(columnName), changes);
+            });
             compareConstraints(name, table.constraints(), current.constraints(), changes);
             compareIndexes(name, table.indexes(), current.indexes(), changes);
         });
         actual.tables().forEach((name, table) -> {
+            if (ignored(ignoredObjects, name)) return;
             if (!desired.tables().containsKey(name))
                 changes.add(change("DROP_TABLE", name, "DROP TABLE " + name + ";", create(table), true, "Tabela excedente"));
             else table.columns().forEach((column, old) -> {
-                if (!desired.tables().get(name).columns().containsKey(column))
+                if (!desired.tables().get(name).columns().containsKey(column) && !ignored(ignoredObjects, name + "." + column))
                     changes.add(change("DROP_COLUMN", name + "." + column,
                         "ALTER TABLE " + name + " DROP COLUMN " + column + ";",
                         "ALTER TABLE " + name + " ADD COLUMN " + definition(old) + ";", true,
@@ -91,8 +157,72 @@ public final class SchemaComparator {
         compareSequences(desired, actual, changes);
         compareViews(desired, actual, changes);
         List<Change> ordered = order(changes);
+        List<String> renames = detectRenames(desired, actual, ordered);
         return new Diff(ordered, script(ordered, false), script(ordered, true),
-            ordered.stream().filter(Change::destructive).count(), Instant.now().toString());
+            ordered.stream().filter(Change::destructive).count(), Instant.now().toString(), renames);
+    }
+
+    private boolean ignored(Set<String> ignoredObjects, String object) {
+        return ignoredObjects.stream().anyMatch(pattern -> pattern.equalsIgnoreCase(object));
+    }
+
+    /**
+     * Heurística de rename: quando uma tabela é criada e outra removida com o mesmo conjunto
+     * de colunas (ou uma coluna é adicionada/removida no mesmo tipo), sugere possível rename
+     * em vez de tratar como perda de dados.
+     */
+    private List<String> detectRenames(Schema desired, Schema actual, List<Change> changes) {
+        List<String> suggestions = new ArrayList<>();
+        List<String> createdTables = changes.stream().filter(c -> c.kind().equals("CREATE_TABLE")).map(Change::object).toList();
+        List<String> droppedTables = changes.stream().filter(c -> c.kind().equals("DROP_TABLE")).map(Change::object).toList();
+        for (String created : createdTables)
+            for (String dropped : droppedTables) {
+                Table newTable = desired.tables().get(created);
+                Table oldTable = actual.tables().get(dropped);
+                if (newTable != null && oldTable != null && sameColumnShape(newTable, oldTable))
+                    suggestions.add("Possível rename de tabela: '" + dropped + "' -> '" + created + "' (mesma estrutura de colunas)");
+            }
+        List<String> addedColumns = changes.stream().filter(c -> c.kind().equals("ADD_COLUMN")).map(Change::object).toList();
+        List<String> droppedColumns = changes.stream().filter(c -> c.kind().equals("DROP_COLUMN")).map(Change::object).toList();
+        for (String added : addedColumns)
+            for (String dropped : droppedColumns) {
+                String addedTable = added.substring(0, added.indexOf('.'));
+                String droppedTable = dropped.substring(0, dropped.indexOf('.'));
+                if (!addedTable.equals(droppedTable)) continue;
+                Column newColumn = desired.tables().get(addedTable).columns().get(added.substring(added.indexOf('.') + 1));
+                Column oldColumn = actual.tables().get(droppedTable).columns().get(dropped.substring(dropped.indexOf('.') + 1));
+                if (newColumn != null && oldColumn != null && canonicalType(newColumn.type()).equals(canonicalType(oldColumn.type())))
+                    suggestions.add("Possível rename de coluna em '" + addedTable + "': '" + dropped.substring(dropped.indexOf('.') + 1) +
+                        "' -> '" + newColumn.name() + "' (mesmo tipo " + canonicalType(newColumn.type()) + ")");
+            }
+        return suggestions;
+    }
+
+    private boolean sameColumnShape(Table a, Table b) {
+        if (a.columns().size() != b.columns().size() || a.columns().isEmpty()) return false;
+        List<String> typesA = a.columns().values().stream().map(c -> canonicalType(c.type())).sorted().toList();
+        List<String> typesB = b.columns().values().stream().map(c -> canonicalType(c.type())).sorted().toList();
+        return typesA.equals(typesB);
+    }
+
+    /** Gera um relatório HTML navegável do diff (destrutivo em destaque). */
+    public String html(Diff diff) {
+        StringBuilder rows = new StringBuilder();
+        diff.changes().forEach(c -> rows.append("<tr class=\"").append(c.destructive() ? "destructive" : "").append("\"><td>")
+            .append(c.kind()).append("</td><td>").append(escapeXml(c.object())).append("</td><td>")
+            .append(escapeXml(c.reason())).append("</td><td>").append(c.destructive() ? "SIM" : "não").append("</td></tr>"));
+        StringBuilder renames = new StringBuilder();
+        diff.possibleRenames().forEach(r -> renames.append("<li>").append(escapeXml(r)).append("</li>"));
+        return """
+            <!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Diff de schema</title>
+            <style>:root{color-scheme:light dark}body{font:15px system-ui;max-width:1100px;margin:auto;padding:2rem}
+            table{border-collapse:collapse;width:100%%}th,td{padding:.5rem;border-bottom:1px solid #8885;text-align:left}
+            .destructive{color:#c0392b;font-weight:bold}</style></head><body><h1>Diff de schema</h1>
+            <p>%d mudança(s) · %d destrutiva(s) · gerado em %s</p>
+            <ul>%s</ul>
+            <table><thead><tr><th>Tipo</th><th>Objeto</th><th>Motivo</th><th>Destrutivo</th></tr></thead><tbody>%s</tbody></table>
+            </body></html>
+            """.formatted(diff.changes().size(), diff.destructiveChanges(), diff.generatedAt(), renames, rows);
     }
 
     public String flyway(Diff diff, String description) {
@@ -366,11 +496,22 @@ public final class SchemaComparator {
 
     private static final class MutableTable {
         final String name;
-        final Map<String, Column> columns = new LinkedHashMap<>();
+        final Map<String, Column> columns = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
         final Map<String, Constraint> constraints = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
         final Map<String, Index> indexes = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
         MutableTable(String name) { this.name = name; }
-        Table freeze() { return new Table(name, Map.copyOf(columns), Map.copyOf(constraints), Map.copyOf(indexes)); }
+        // Map.copyOf() NÃO preserva o comparator case-insensitive do TreeMap de origem — ele copia as
+        // entradas para um mapa comum, o que reintroduziria comparação sensível a maiúsculas/minúsculas
+        // (relevante ao comparar DDL escrito em minúsculas com bancos que uppercase identificadores, como H2/Oracle).
+        // Por isso envolvemos em unmodifiableSortedMap sobre uma NOVA TreeMap com o mesmo comparator.
+        Table freeze() {
+            return new Table(name, caseInsensitiveCopy(columns), caseInsensitiveCopy(constraints), caseInsensitiveCopy(indexes));
+        }
+        private static <V> Map<String, V> caseInsensitiveCopy(Map<String, V> source) {
+            Map<String, V> copy = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
+            copy.putAll(source);
+            return Collections.unmodifiableMap(copy);
+        }
     }
     public record Column(String name, String type, boolean notNull, String defaultValue,
                          boolean primaryKey, boolean unique, boolean identity, String references) {}
@@ -385,7 +526,7 @@ public final class SchemaComparator {
     public record Change(String kind, String object, String sql, String rollbackSql,
                          boolean destructive, String reason) {}
     public record Diff(List<Change> changes, String migrationSql, String rollbackSql,
-                       long destructiveChanges, String generatedAt) {
+                       long destructiveChanges, String generatedAt, List<String> possibleRenames) {
         public boolean synchronizedAlready() { return changes.isEmpty(); }
     }
 }
