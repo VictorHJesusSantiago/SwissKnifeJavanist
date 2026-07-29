@@ -381,7 +381,11 @@ public final class DependencyVisualizer {
         return value.trim();
     }
     private String id(String name) { return name.replaceAll("[^A-Za-z0-9_]", "_"); }
-    private String escape(String value) { return value.replace("&", "&amp;").replace("<", "&lt;").replace("\"", "&quot;"); }
+    /** Escapa também '>' e '\'': o mesmo helper alimenta Mermaid/PlantUML/DOT e os relatórios HTML. */
+    private String escape(String value) {
+        return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+            .replace("\"", "&quot;").replace("'", "&#39;");
+    }
 
     private static final class MutableService {
         final String name;
