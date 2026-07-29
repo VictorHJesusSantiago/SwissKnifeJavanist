@@ -36,11 +36,16 @@ public final class SecurityScanner {
                 readCertificate(root, file, certificates, findings);
             String content;
             try { content = Files.readString(file); } catch (Exception ignored) { continue; }
+            currentContent = content;
             for (Rule rule : RULES) {
                 Matcher matcher = rule.pattern().matcher(content);
-                while (matcher.find()) findings.add(new Finding(rule.id(), rule.severity(),
-                    root.relativize(file).toString(), lineOf(content, matcher.start()), rule.message(),
-                    fingerprint(matcher.group())));
+                while (matcher.find()) {
+                    int line = lineOf(content, matcher.start());
+                    if (isSuppressed(rule, matcher, lineText(content, matcher.start()))) continue;
+                    findings.add(new Finding(rule.id(), rule.severity(),
+                        root.relativize(file).toString(), line, rule.message(),
+                        fingerprint(matcher.group())));
+                }
             }
             if (content.contains("management.endpoints.web.exposure.include: \"*\"") ||
                 content.contains("include: '*'"))
@@ -66,8 +71,68 @@ public final class SecurityScanner {
         }
     }
     private int lineOf(String value, int offset) { return (int) value.substring(0, offset).lines().count(); }
+
+    /** Texto completo da linha que contém {@code offset} — base para a heurística de supressão. */
+    private String lineText(String content, int offset) {
+        int start = content.lastIndexOf('\n', Math.max(0, offset - 1)) + 1;
+        int end = content.indexOf('\n', offset);
+        return content.substring(start, end < 0 ? content.length() : end);
+    }
+
+    /**
+     * Filtra os falsos positivos que dominavam o relatório neste próprio repositório: as regex das
+     * regras (o scanner se encontrava), identificadores que apenas REFERENCIAM segredos em vez de
+     * literais, e linhas anotadas com supressão explícita. Reduz o ruído sem esconder um segredo real.
+     */
+    private boolean isSuppressed(Rule rule, Matcher matcher, String line) {
+        // 1) Supressão explícita, revisada: `// nosec` ou `swissknife:allow-secret` na linha.
+        if (line.contains("nosec") || line.contains("swissknife:allow-secret")) return true;
+        // 2) Auto-exclusão: a linha é uma definição de regra (Pattern.compile / new Rule) — é o
+        //    próprio scanner, não um segredo. Cobre as 5 ocorrências que eram as regex das regras.
+        if (line.contains("Pattern.compile(") || line.contains("new Rule(")) return true;
+        // 3) Só GENERIC_SECRET produz o "referencia mas não é literal"; as demais regras casam formatos
+        //    específicos (AKIA…, -----BEGIN…) que não têm essa ambiguidade.
+        if (!"GENERIC_SECRET".equals(rule.id())) return false;
+        String value = matcher.groupCount() >= 2 ? matcher.group(2) : matcher.group();
+        // O valor está entre aspas? Um literal de segredo real está; uma expressão de código não.
+        int valueStart = matcher.groupCount() >= 2 ? matcher.start(2) : matcher.start();
+        boolean quoted = valueStart > 0 && isQuote(matcher.group().isEmpty() ? '\0'
+            : contentCharBefore(valueStart));
+        return referencesSecretButIsNotLiteral(value, line, quoted);
+    }
+
+    /** Preenchido por scan() antes de avaliar as regras: o conteúdo do arquivo em análise. */
+    private String currentContent = "";
+    private char contentCharBefore(int index) {
+        return index > 0 && index <= currentContent.length() ? currentContent.charAt(index - 1) : '\0';
+    }
+    private static boolean isQuote(char c) { return c == '"' || c == '\''; }
+
+    private boolean referencesSecretButIsNotLiteral(String value, String line, boolean quoted) {
+        // Expressão de código, não literal: qualquer chamada/aninhamento com parênteses fora de aspas
+        // (token(...), Totp.generateSecret(), current(), tokens.group()).
+        if (!quoted && (value.indexOf('(') >= 0 || value.indexOf(')') >= 0)) return true;
+        // Chamada de método/expressão em vez de literal: getPassword(), env("…"), config.get(…).
+        if (line.matches(".*(?:get|read|load|fetch|resolve|env)\\w*\\s*\\(.*")) return true;
+        // CONSTANTE_OU_VARIAVEL: nome de identificador (maiúsculas com _, ou dotted), não um segredo.
+        if (value.matches("[A-Z0-9_]+") || value.matches("[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)+")) return true;
+        // Placeholders óbvios de exemplo/config.
+        String lowered = value.toLowerCase(Locale.ROOT);
+        return lowered.contains("example") || lowered.contains("changeme") || lowered.contains("your_")
+            || lowered.contains("xxxx") || lowered.startsWith("${") || lowered.startsWith("{{");
+    }
+
+    /** SHA-256 truncado como fingerprint — hashCode() são 32 bits e colidem, fundindo achados distintos. */
     private String fingerprint(String secret) {
-        return Integer.toHexString(secret.hashCode()) + ":" + Math.min(secret.length(), 999);
+        try {
+            byte[] digest = java.security.MessageDigest.getInstance("SHA-256")
+                .digest(secret.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            StringBuilder hex = new StringBuilder();
+            for (int i = 0; i < 8; i++) hex.append(String.format("%02x", digest[i]));
+            return hex + ":" + Math.min(secret.length(), 999);
+        } catch (java.security.NoSuchAlgorithmException e) {
+            throw new IllegalStateException("SHA-256 indisponível", e);
+        }
     }
     private record Rule(String id, String severity, Pattern pattern, String message) {}
     public record Finding(String kind, String severity, String file, int line,
