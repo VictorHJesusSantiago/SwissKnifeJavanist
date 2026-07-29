@@ -54,6 +54,8 @@ public final class AssetServer {
             }
             case "DELETE" -> {
                 HttpSupport.requireScope(e, "write", "admin");
+                // DELETE na coleção (sem id) resultava em NPE dentro de Map.of — 500 em vez de 400.
+                if (id == null) throw new IllegalArgumentException("Informe o ID do ativo a excluir");
                 HttpSupport.json(e, store.delete(id) ? 200 : 404, Map.of("deleted", id));
             }
             default -> HttpSupport.json(e, 405, Map.of("error", "Método não permitido"));
