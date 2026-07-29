@@ -249,7 +249,23 @@ public final class OutputFormatter {
         return scalar(value) ? String.valueOf(value) : Json.stringify(value);
     }
     private static String csvCell(String value) {
-        return "\"" + value.replace("\"", "\"\"") + "\"";
+        return "\"" + neutralizeFormula(value).replace("\"", "\"\"") + "\"";
+    }
+
+    /**
+     * Neutraliza injeção de fórmula em CSV NESTE sink de relatório: Excel/Sheets executa uma célula
+     * que começa por {@code = + - @ TAB CR}. Prefixa com apóstrofo, que a planilha trata como "texto".
+     *
+     * Só aqui, de propósito: em {@code Csv.escape} (usado por migrate/anonymize) o mesmo prefixo
+     * corromperia números negativos legítimos num round-trip de dados. Relatório é para leitura humana,
+     * onde o apóstrofo é aceitável; dados são para reimportação, onde não é.
+     */
+    private static String neutralizeFormula(String value) {
+        if (value.isEmpty()) return value;
+        char first = value.charAt(0);
+        if (first == '=' || first == '+' || first == '-' || first == '@' || first == '\t' || first == '\r')
+            return "'" + value;
+        return value;
     }
     private static String escapeXml(String value) {
         return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
