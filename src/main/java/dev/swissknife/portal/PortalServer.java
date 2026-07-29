@@ -1,6 +1,7 @@
 package dev.swissknife.portal;
 
 import com.sun.net.httpserver.*;
+import dev.swissknife.cli.CommandExecutor;
 import dev.swissknife.server.HttpSupport;
 import dev.swissknife.util.Json;
 import java.io.IOException;
@@ -20,14 +21,16 @@ public final class PortalServer {
     private final String itamUrl;
     private final JobManager jobs;
 
-    public PortalServer(int port, String vulnerabilityUrl, String itamUrl) throws IOException {
-        this(port,vulnerabilityUrl,itamUrl,Path.of(System.getenv().getOrDefault("SWISSKNIFE_JOBS_DB","data/portal-jobs.db")));
+    public PortalServer(int port, String vulnerabilityUrl, String itamUrl, CommandExecutor commandExecutor) throws IOException {
+        this(port,vulnerabilityUrl,itamUrl,
+            Path.of(System.getenv().getOrDefault("SWISSKNIFE_JOBS_DB","data/portal-jobs.db")),commandExecutor);
     }
-    public PortalServer(int port, String vulnerabilityUrl, String itamUrl,Path jobsDatabase) throws IOException {
+    public PortalServer(int port, String vulnerabilityUrl, String itamUrl,Path jobsDatabase,
+                        CommandExecutor commandExecutor) throws IOException {
         this.vulnerabilityUrl = vulnerabilityUrl;
         this.itamUrl = itamUrl;
         this.jobs=new JobManager(jobsDatabase,integerEnv("SWISSKNIFE_JOB_CONCURRENCY",4),
-            integerEnv("SWISSKNIFE_JOB_HISTORY",500));
+            integerEnv("SWISSKNIFE_JOB_HISTORY",500),commandExecutor);
         server = HttpServer.create(new InetSocketAddress("127.0.0.1", port), 0);
         server.setExecutor(Executors.newVirtualThreadPerTaskExecutor());
         server.createContext("/", this::page);
@@ -88,6 +91,11 @@ public final class PortalServer {
                     else jobs.find(suffix).ifPresentOrElse(job->send(exchange,200,job),()->send(exchange,404,Map.of("error","Job não encontrado")));
                 }
                 case"POST"->{
+                    // Submeter um job executa uma análise no processo do portal e vários comandos da
+                    // allowlist gravam artefatos em disco (deps-export, schema-script, docs-site...).
+                    // Isso é uma escrita: sem requireScope, um token somente-leitura obtinha execução
+                    // de código/escrita de arquivos aqui, enquanto os backends barram o mesmo token.
+                    HttpSupport.requireScope(exchange,"write","admin");
                     if(!suffix.isBlank()){HttpSupport.json(exchange,404,Map.of("error","Rota inválida"));return;}
                     Map<String,Object> body=HttpSupport.body(exchange);
                     if(!(body.get("command") instanceof List<?> list)||list.isEmpty())
@@ -95,6 +103,7 @@ public final class PortalServer {
                     HttpSupport.json(exchange,202,jobs.submit(list.stream().map(String::valueOf).toList()));
                 }
                 case"DELETE"->{
+                    HttpSupport.requireScope(exchange,"write","admin");
                     if(suffix.isBlank())throw new IllegalArgumentException("ID do job é obrigatório");
                     HttpSupport.json(exchange,200,jobs.cancel(suffix));
                 }
@@ -184,7 +193,7 @@ public final class PortalServer {
         <option value="detect-pii">Detectar PII</option><option value="contract-test">Teste de contrato</option>
         <option value="slow-query-file">Analisar SQL (lote)</option><option value="jvm-diagnose">Diagnóstico JVM</option></select></label>
         <label>Caminho ou argumento principal<input id="target" value="." required></label>
-        <label>Token da API (mantido somente nesta aba)<input id="api-token" type="password" autocomplete="off"></label>
+        <label>Token da API (somente em memória; descartado ao fechar a aba)<input id="api-token" type="password" autocomplete="off"></label>
         <button type="submit" class="primary">Executar</button><span id="feedback" role="status"></span></form></section>
         <section aria-labelledby="jobs-title"><div class="section-title"><h2 id="jobs-title">Execuções</h2>
         <button id="refresh">Atualizar</button></div>
@@ -234,9 +243,11 @@ public final class PortalServer {
           cards.innerHTML=Object.entries(data).map(([name,value])=>`<article class="card ${value.status==='UP'?'up':''}">
           <b>${label(name)}</b><div class="status"><span class="dot"></span>${value.status||'DESCONHECIDO'}</div></article>`).join('');
         }).catch(()=>cards.innerHTML='<article class="card">Não foi possível consultar os serviços.</article>');
-        const auth=()=>{const token=document.querySelector('#api-token').value;sessionStorage.apiToken=token;
+        // O token vive apenas em memória (na closure e no campo de senha), nunca em session/localStorage:
+        // qualquer XSS lê o storage, e persistir o token o transforma em credencial roubável. Fechar a
+        // aba já o descarta, que é o comportamento desejado para um painel de operador local.
+        const auth=()=>{const token=document.querySelector('#api-token').value;
           return token?{'Authorization':'Bearer '+token}:{}};
-        document.querySelector('#api-token').value=sessionStorage.apiToken||'';
         const escapeHtml=value=>String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
         let lastJobs=[];
         function renderJobs(){
