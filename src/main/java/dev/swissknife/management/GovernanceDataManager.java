@@ -7,6 +7,8 @@ import java.nio.file.*;
 import java.time.*;
 import java.time.temporal.ChronoUnit;
 import java.util.*;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
 /** Importação, deduplicação, workflow e relatórios para vulnerabilidades e ativos. */
 public final class GovernanceDataManager {
@@ -40,7 +42,11 @@ public final class GovernanceDataManager {
 
     public WorkflowResult vulnerabilityTransition(Path database,String id,String status,String actor,String comment)
         throws IOException{
-        JsonStore store=new JsonStore(database);
+        return vulnerabilityTransition(new JsonStore(database),id,status,actor,comment);
+    }
+
+    private WorkflowResult vulnerabilityTransition(JsonStore store,String id,String status,String actor,String comment)
+        throws IOException{
         Map<String,Object> item=store.find(id).orElseThrow(()->new IllegalArgumentException("Vulnerabilidade não encontrada: "+id));
         String from=String.valueOf(item.getOrDefault("status","OPEN"));
         String target=status.toUpperCase(Locale.ROOT);
@@ -81,12 +87,19 @@ public final class GovernanceDataManager {
         return new VulnerabilityReport(all.size(),overdue,averageAge,mttr,severity,status,project,oldest,aging,deleted);
     }
 
-    /** Aplica a mesma transição de workflow a vários IDs, retornando sucesso/erro por item. */
+    /**
+     * Aplica a mesma transição de workflow a vários IDs, retornando sucesso/erro por item.
+     *
+     * Abre o store UMA vez para o lote inteiro. Abrir por ID era quadrático: cada
+     * {@code new JsonStore(...)} relê o banco inteiro e todo o log de auditoria (que só cresce),
+     * então um lote de mil IDs sobre um audit log de 10 MB fazia ~10 GB de leitura.
+     */
     public List<BulkResult> vulnerabilityBulkTransition(Path database,List<String> ids,String status,String actor,String comment)
         throws IOException{
+        JsonStore store=new JsonStore(database);
         List<BulkResult> results=new ArrayList<>();
         for(String id:ids){
-            try{ vulnerabilityTransition(database,id,status,actor,comment); results.add(new BulkResult(id,true,"")); }
+            try{ vulnerabilityTransition(store,id,status,actor,comment); results.add(new BulkResult(id,true,"")); }
             catch(Exception e){ results.add(new BulkResult(id,false,e.getMessage())); }
         }
         return results;
@@ -114,7 +127,9 @@ public final class GovernanceDataManager {
             if(!"ACCEPTED".equals(item.get("status"))) continue;
             LocalDate until=date(item.get("acceptedUntil"));
             if(until==null||!until.isBefore(LocalDate.now())) continue;
-            reverted.add(vulnerabilityTransition(database,String.valueOf(item.get("id")),"OPEN","system",
+            // Reutiliza o mesmo store: abrir um por item além de quadrático deixava o store externo
+            // desatualizado em relação às gravações feitas pelas instâncias internas.
+            reverted.add(vulnerabilityTransition(store,String.valueOf(item.get("id")),"OPEN","system",
                 "Aceitação de risco expirada em "+until));
         }
         return reverted;
@@ -159,7 +174,11 @@ public final class GovernanceDataManager {
 
     public WorkflowResult assetTransition(Path database,String id,String action,String actor,String details)
         throws IOException{
-        JsonStore store=new JsonStore(database);
+        return assetTransition(new JsonStore(database),id,action,actor,details);
+    }
+
+    private WorkflowResult assetTransition(JsonStore store,String id,String action,String actor,String details)
+        throws IOException{
         Map<String,Object> asset=store.find(id).orElseThrow(()->new IllegalArgumentException("Ativo não encontrado: "+id));
         String from=String.valueOf(asset.getOrDefault("status","IN_STOCK"));
         String target=switch(action.toLowerCase(Locale.ROOT)){
@@ -173,8 +192,8 @@ public final class GovernanceDataManager {
         if(action.equalsIgnoreCase("maintenance")){
             var costMatcher=java.util.regex.Pattern.compile("cost=(\\d+(?:\\.\\d+)?)").matcher(details==null?"":details);
             if(costMatcher.find()){
-                double cost=Double.parseDouble(costMatcher.group(1));
-                asset.put("maintenanceCostTotal",number(asset.get("maintenanceCostTotal"))+cost);
+                java.math.BigDecimal cost=new java.math.BigDecimal(costMatcher.group(1));
+                asset.put("maintenanceCostTotal",money(asset.get("maintenanceCostTotal")).add(cost).toPlainString());
             }
         }
         List<Object> history=list(asset.get("history"));history.add(Map.of("timestamp",Instant.now().toString(),
@@ -183,12 +202,13 @@ public final class GovernanceDataManager {
         return new WorkflowResult(id,from,target,actor,history.size());
     }
 
-    /** Aplica a mesma ação (checkout/checkin/maintenance/retire/lost) a vários ativos. */
+    /** Aplica a mesma ação (checkout/checkin/maintenance/retire/lost) a vários ativos, com um único store por lote. */
     public List<BulkResult> assetBulkTransition(Path database,List<String> ids,String action,String actor,String details)
         throws IOException{
+        JsonStore store=new JsonStore(database);
         List<BulkResult> results=new ArrayList<>();
         for(String id:ids){
-            try{ assetTransition(database,id,action,actor,details); results.add(new BulkResult(id,true,"")); }
+            try{ assetTransition(store,id,action,actor,details); results.add(new BulkResult(id,true,"")); }
             catch(Exception e){ results.add(new BulkResult(id,false,e.getMessage())); }
         }
         return results;
@@ -211,27 +231,40 @@ public final class GovernanceDataManager {
         List<Map<String,Object>> everything=new JsonStore(database).all();
         List<Map<String,Object>> all=everything.stream().filter(item->!isDeleted(item)).toList();
         Map<String,Long> types=count(all,"type"),statuses=count(all,"status"),departments=count(all,"department");
-        double value=all.stream().map(item->number(item.get("purchaseValue"))).mapToDouble(Double::doubleValue).sum();
+        java.math.BigDecimal value=all.stream().map(item->money(item.get("purchaseValue")))
+            .reduce(java.math.BigDecimal.ZERO,java.math.BigDecimal::add);
         long warranty=all.stream().filter(item->{
             LocalDate date=date(item.get("warrantyEnd"));return date!=null&&!date.isBefore(LocalDate.now())&&date.isBefore(LocalDate.now().plusDays(90));
         }).count();
         long unassigned=all.stream().filter(item->String.valueOf(item.getOrDefault("assignedTo","")).isBlank()&&
             String.valueOf(item.getOrDefault("status","")).equals("IN_USE")).count();
-        double bookValue=all.stream().mapToDouble(this::depreciatedValue).sum();
-        double maintenanceCost=all.stream().mapToDouble(item->number(item.get("maintenanceCostTotal"))).sum();
+        java.math.BigDecimal bookValue=all.stream().map(this::depreciatedValue)
+            .reduce(java.math.BigDecimal.ZERO,java.math.BigDecimal::add);
+        java.math.BigDecimal maintenanceCost=all.stream().map(item->money(item.get("maintenanceCostTotal")))
+            .reduce(java.math.BigDecimal.ZERO,java.math.BigDecimal::add);
         long deleted=everything.size()-all.size();
         return new AssetReport(all.size(),value,warranty,unassigned,types,statuses,departments,bookValue,maintenanceCost,deleted);
     }
 
     /** Depreciação linear simples: valor - (valor/vidaÚtilAnos)*anosDecorridos, nunca abaixo de zero. */
-    private double depreciatedValue(Map<String,Object> asset){
-        double purchaseValue=number(asset.get("purchaseValue"));
+    private java.math.BigDecimal depreciatedValue(Map<String,Object> asset){
+        java.math.BigDecimal purchaseValue=money(asset.get("purchaseValue"));
         LocalDate purchaseDate=date(asset.get("purchaseDate"));
         double usefulLifeYears=number(asset.get("usefulLifeYears"));
         if(purchaseDate==null||usefulLifeYears<=0) return purchaseValue;
         double yearsElapsed=ChronoUnit.DAYS.between(purchaseDate,LocalDate.now())/365.25;
         double remaining=1.0-Math.min(1.0,Math.max(0,yearsElapsed/usefulLifeYears));
-        return purchaseValue*remaining;
+        // A razão de depreciação é intrinsecamente fracionária (dias/365.25); mantê-la em double é
+        // correto. O dinheiro é que não pode ser double: arredonda o resultado para 2 casas HALF_UP.
+        return purchaseValue.multiply(java.math.BigDecimal.valueOf(remaining))
+            .setScale(2,java.math.RoundingMode.HALF_UP);
+    }
+
+    /** Converte um valor monetário armazenado (String/Number) em BigDecimal exato; ausente/ inválido → zero. */
+    private java.math.BigDecimal money(Object value){
+        if(value==null) return java.math.BigDecimal.ZERO;
+        try{ return new java.math.BigDecimal(String.valueOf(value)); }
+        catch(NumberFormatException e){ return java.math.BigDecimal.ZERO; }
     }
 
     @SuppressWarnings("unchecked")
@@ -277,8 +310,21 @@ public final class GovernanceDataManager {
         item.put("severity",String.valueOf(item.getOrDefault("severity","MEDIUM")).toUpperCase(Locale.ROOT));
         item.putIfAbsent("status","OPEN");item.putIfAbsent("source",source);item.putIfAbsent("createdAt",Instant.now().toString());
     }
-    private String fingerprint(Map<String,Object> item){return Integer.toHexString(Objects.hash(
-        item.get("cve"),item.get("title"),item.get("component"),item.get("dependencyName"),item.get("affectedVersion")));}
+    /**
+     * Identidade de deduplicação: SHA-256 (truncado a 128 bits) dos campos que definem o finding.
+     * Objects.hash() são 32 bits — com poucos milhares de findings o paradoxo do aniversário torna a
+     * colisão provável, e uma colisão aqui não é um detalhe de performance: dois findings distintos
+     * viram um só, sobrescrevendo silenciosamente severidade/componente do primeiro. O separador \0
+     * evita que ("ab","c") e ("a","bc") produzam o mesmo digest.
+     */
+    private String fingerprint(Map<String,Object> item){
+        String joined=Stream.of("cve","title","component","dependencyName","affectedVersion")
+            .map(field->String.valueOf(item.get(field))).collect(Collectors.joining("\0"));
+        try{
+            return HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256")
+                .digest(joined.getBytes(java.nio.charset.StandardCharsets.UTF_8))).substring(0,32);
+        }catch(java.security.NoSuchAlgorithmException e){throw new IllegalStateException(e);}
+    }
     private boolean isDeleted(Map<String,Object> item){ return item.get("deletedAt")!=null; }
     private boolean overdue(Map<String,Object> item){Instant due=instant(item.get("dueAt"));String status=String.valueOf(item.getOrDefault("status","OPEN"));
         return due!=null&&due.isBefore(Instant.now())&&!Set.of("RESOLVED","ACCEPTED").contains(status);}
@@ -305,8 +351,8 @@ public final class GovernanceDataManager {
     public record VulnerabilityReport(int total,long overdue,double averageAgeDays,double mttrHours,
         Map<String,Long> bySeverity,Map<String,Long> byStatus,Map<String,Long> byProject,List<Map<String,Object>> oldest,
         Map<String,Long> aging,long deleted){}
-    public record AssetReport(int total,double purchaseValue,long warrantyExpiringIn90Days,long inUseWithoutAssignee,
+    public record AssetReport(int total,java.math.BigDecimal purchaseValue,long warrantyExpiringIn90Days,long inUseWithoutAssignee,
         Map<String,Long> byType,Map<String,Long> byStatus,Map<String,Long> byDepartment,
-        double bookValue,double maintenanceCostTotal,long deleted){}
+        java.math.BigDecimal bookValue,java.math.BigDecimal maintenanceCostTotal,long deleted){}
     public record BulkResult(String id,boolean success,String error){}
 }
