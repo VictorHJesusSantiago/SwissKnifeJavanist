@@ -137,7 +137,7 @@ public final class FunctionalIntegrationTest {
     private static void portalJobs() throws Exception {
         Path root=Files.createTempDirectory("portal-jobs");
         Files.writeString(root.resolve("Sample.java"),"public class Sample { public int value(){ return 1; } }");
-        PortalServer portal=new PortalServer(0,"http://127.0.0.1:1","http://127.0.0.1:2",root.resolve("jobs.db"));
+        PortalServer portal=new PortalServer(0,"http://127.0.0.1:1","http://127.0.0.1:2",root.resolve("jobs.db"),Main::execute);
         portal.start();
         try{
             HttpClient client=HttpClient.newHttpClient();

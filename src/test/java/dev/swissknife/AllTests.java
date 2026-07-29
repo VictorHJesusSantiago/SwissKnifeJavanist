@@ -14,11 +14,13 @@ public final class AllTests {
         tests.put("AnonymizerTest", AnonymizerTest::run);
         tests.put("GatlingTest", GatlingTest::run);
         tests.put("ServerTest", ServerTest::run);
+        tests.put("AuthenticatedPathTest", AuthenticatedPathTest::run);
         tests.put("CliTest", CliTest::run);
         tests.put("GovernanceTest", GovernanceTest::run);
         tests.put("AdvancedFeaturesTest", AdvancedFeaturesTest::run);
         tests.put("FunctionalIntegrationTest", FunctionalIntegrationTest::run);
         tests.put("SessionFeaturesTest", SessionFeaturesTest::run);
+        tests.put("AuditRegressionTest", AuditRegressionTest::run);
         int passed = 0;
         for (var test : tests.entrySet()) {
             try {
