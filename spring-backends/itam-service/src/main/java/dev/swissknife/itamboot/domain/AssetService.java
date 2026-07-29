@@ -1,6 +1,7 @@
 package dev.swissknife.itamboot.domain;
 
 import dev.swissknife.itamboot.api.AssetRequest;
+import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
@@ -15,6 +16,10 @@ import static org.springframework.http.HttpStatus.*;
 public class AssetService {
     private final AssetRepository repository;
     public AssetService(AssetRepository repository){this.repository=repository;}
+    /** Teto de registros por requisição: sem ele GET /assets materializa a tabela inteira (ver VulnerabilityService). */
+    static final int MAX_PAGE_SIZE=500;
+    static final int DEFAULT_PAGE_SIZE=200;
+
     @Transactional(readOnly=true) public List<Asset> list(){return list(null,null,null,null);}
     /**
      * Filtragem via Specification (traduzida para WHERE no banco) em vez de findAll()+stream, para
@@ -22,7 +27,14 @@ public class AssetService {
      */
     @Transactional(readOnly=true)
     public List<Asset> list(Asset.Status status,Asset.Type type,String owner,String query){
-        Specification<Asset> spec=Specification.where(null);
+        return list(status,type,owner,query,0,DEFAULT_PAGE_SIZE);
+    }
+
+    @Transactional(readOnly=true)
+    public List<Asset> list(Asset.Status status,Asset.Type type,String owner,String query,int page,int size){
+        // allOf() sem argumentos = conjunção vazia (irrestrita); substitui Specification.where(null),
+        // depreciado no Spring Data JPA 3.5 por aceitar null silenciosamente.
+        Specification<Asset> spec=Specification.allOf();
         if(status!=null) spec=spec.and((root,cq,cb)->cb.equal(root.get("status"),status));
         if(type!=null) spec=spec.and((root,cq,cb)->cb.equal(root.get("type"),type));
         if(owner!=null && !owner.isBlank()) spec=spec.and((root,cq,cb)->cb.equal(cb.lower(root.get("assignedTo")),owner.toLowerCase(Locale.ROOT)));
@@ -35,7 +47,9 @@ public class AssetService {
                 cb.like(cb.lower(cb.coalesce(root.get("manufacturer"),"")),pattern),
                 cb.like(cb.lower(cb.coalesce(root.get("model"),"")),pattern)));
         }
-        return repository.findAll(spec, Sort.by(Sort.Direction.DESC,"createdAt"));
+        var pageable=PageRequest.of(Math.max(0,page),Math.min(Math.max(1,size),MAX_PAGE_SIZE),
+            Sort.by(Sort.Direction.DESC,"createdAt"));
+        return repository.findAll(spec,pageable).getContent();
     }
     @Transactional(readOnly=true) public Asset get(UUID id){return repository.findById(id).orElseThrow(()->new ResponseStatusException(NOT_FOUND));}
     public Asset create(AssetRequest r){

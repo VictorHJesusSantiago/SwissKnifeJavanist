@@ -11,9 +11,12 @@ import java.util.*;
 public class AssetController {
     private final AssetService service;
     public AssetController(AssetService service){this.service=service;}
+    /** page/size são aditivos e opcionais; a resposta continua sendo um array JSON (mudança não quebra clientes). */
     @GetMapping("/assets") public List<Asset> list(@RequestParam(required=false) Asset.Status status,
         @RequestParam(required=false) Asset.Type type,@RequestParam(required=false) String assignedTo,
-        @RequestParam(required=false,name="q") String query){return service.list(status,type,assignedTo,query);}
+        @RequestParam(required=false,name="q") String query,
+        @RequestParam(defaultValue="0") int page,
+        @RequestParam(defaultValue="200") int size){return service.list(status,type,assignedTo,query,page,size);}
     @GetMapping("/assets/{id}") public Asset get(@PathVariable UUID id){return service.get(id);}
     @PostMapping("/assets") @ResponseStatus(HttpStatus.CREATED) public Asset create(@Valid @RequestBody AssetRequest body){return service.create(body);}
     @PutMapping("/assets/{id}") public Asset update(@PathVariable UUID id,@Valid @RequestBody AssetRequest body){return service.update(id,body);}
