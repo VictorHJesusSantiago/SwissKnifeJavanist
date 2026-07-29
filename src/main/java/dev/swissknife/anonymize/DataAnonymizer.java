@@ -79,12 +79,19 @@ public final class DataAnonymizer {
         return configured.isEmpty() ? ',' : configured.charAt(0);
     }
 
+    /**
+     * A permutação usa SecureRandom: em "shuffle" a única coisa que impede religar valor a titular é
+     * a imprevisibilidade da permutação. O gerador padrão da biblioteca é um LCG de 48 bits semeado
+     * pelo relógio — dado o arquivo de saída, a permutação é reconstruível e a anonimização vira
+     * reversível. (É também a regra INSECURE_RANDOM do SecurityScanner deste próprio repositório.)
+     */
     private void applyShuffle(List<String> headers, List<List<String>> rows, Properties policy) {
+        SecureRandom random = new SecureRandom();
         for (int col = 0; col < headers.size(); col++) {
             if (!"shuffle".equalsIgnoreCase(policy.getProperty(headers.get(col), ""))) continue;
             List<String> values = new ArrayList<>();
             for (List<String> row : rows) if (col < row.size()) values.add(row.get(col));
-            Collections.shuffle(values, new Random());
+            Collections.shuffle(values, random);
             int index = 0;
             for (List<String> row : rows) if (col < row.size()) row.set(col, values.get(index++));
         }
@@ -121,7 +128,10 @@ public final class DataAnonymizer {
     }
 
     public DetectionReport detect(Path input) throws IOException {
-        List<String> lines = Files.readAllLines(input, StandardCharsets.UTF_8);
+        // Csv.splitRecords (e não readAllLines) pelo mesmo motivo de anonymize(): um campo entre
+        // aspas com quebra de linha conta como UM registro. Com readAllLines as colunas saíam
+        // deslocadas a partir da primeira célula multilinha e a detecção de PII apontava o campo errado.
+        List<String> lines = Csv.splitRecords(Files.readString(input, StandardCharsets.UTF_8));
         if (lines.isEmpty()) return new DetectionReport(List.of(), 0);
         List<String> headers = Csv.parseLine(lines.getFirst());
         List<PiiColumn> detected = detectHeaders(headers);
@@ -165,8 +175,9 @@ public final class DataAnonymizer {
             case "phone" -> "+5500000" + String.format("%04d", row % 10_000);
             case "cpf" -> cpf(hash(salt() + value));
             case "cnpj" -> cnpj(hash(salt() + value));
-            case "cep" -> String.format("%05d-%03d", Math.floorMod(value.hashCode(), 100_000),
-                Math.floorMod(value.hashCode() / 100_000, 1_000));
+            // CEP derivado de SHA-256 com sal, não de String.hashCode(): o espaço de CEPs tem apenas
+            // 10^8 valores, então um hashCode não salgado é invertível por força bruta em segundos.
+            case "cep" -> cep(hash(salt() + value));
             case "uuid" -> UUID.nameUUIDFromBytes((salt() + value).getBytes(StandardCharsets.UTF_8)).toString();
             default -> throw new IllegalArgumentException("Estratégia desconhecida: " + strategy);
         };
@@ -271,6 +282,11 @@ public final class DataAnonymizer {
             .collect(StringBuilder::new, StringBuilder::append, StringBuilder::append).toString();
         return digits.substring(0,2)+"."+digits.substring(2,5)+"."+digits.substring(5,8)+"/"+
             digits.substring(8,12)+"-"+digits.substring(12,14);
+    }
+    private String cep(String hash) {
+        StringBuilder digits = new StringBuilder();
+        for (int i = 0; i < 8; i++) digits.append(Character.digit(hash.charAt(i), 16) % 10);
+        return digits.substring(0, 5) + "-" + digits.substring(5, 8);
     }
     private int checkDigit(int[] digits, int length, int weight) {
         int total = 0; for (int i = 0; i < length; i++) total += digits[i] * (weight - i);
