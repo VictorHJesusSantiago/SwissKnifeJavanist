@@ -21,6 +21,7 @@ import dev.swissknife.sql.*;
 import dev.swissknife.testing.*;
 import dev.swissknife.util.*;
 import dev.swissknife.vulnerability.*;
+import java.io.IOException;
 import java.nio.file.*;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -646,7 +647,7 @@ public final class Main {
                 int port = args.length > 1 ? Integer.parseInt(args[1]) : 8080;
                 String vuln = option(args, "--vulnerability-url", "http://127.0.0.1:8081");
                 String itam = option(args, "--itam-url", "http://127.0.0.1:8082");
-                var server = new PortalServer(port, vuln, itam); server.start();
+                var server = new PortalServer(port, vuln, itam, Main::execute); server.start();
                 System.out.println("Portal em http://127.0.0.1:" + server.port());
                 awaitShutdown("Portal"); yield null;
             }
@@ -674,12 +675,27 @@ public final class Main {
         };
     }
 
-    private static PluginRegistry pluginRegistry;
+    /**
+     * Campo estático mutável alcançado por várias threads: os jobs do portal e `pipeline --parallel`
+     * chamam execute() concorrentemente. A publicação preguiçosa sem sincronização era uma corrida de
+     * dados — sem barreira de memória, outra thread pode observar a referência já atribuída enquanto
+     * enxerga o mapa interno do registry ainda não inicializado. `volatile` + double-checked locking
+     * dá a publicação segura mantendo o carregamento único e preguiçoso.
+     */
+    private static volatile PluginRegistry pluginRegistry;
+    private static final Object PLUGIN_LOCK = new Object();
+    private static PluginRegistry pluginRegistry() throws IOException {
+        PluginRegistry local = pluginRegistry;
+        if (local == null) synchronized (PLUGIN_LOCK) {
+            local = pluginRegistry;
+            if (local == null) pluginRegistry = local = PluginRegistry.load(path(".swissknife/plugins"));
+        }
+        return local;
+    }
     private static Object executePlugin(String[] args) throws Exception {
-        if (pluginRegistry == null)
-            pluginRegistry = PluginRegistry.load(path(".swissknife/plugins"));
-        if (!pluginRegistry.has(args[0])) throw new IllegalArgumentException("Comando desconhecido: " + args[0]);
-        return pluginRegistry.execute(args, CliConfig.load(Path.of("").toAbsolutePath(), null, null, Map.of()));
+        PluginRegistry registry = pluginRegistry();
+        if (!registry.has(args[0])) throw new IllegalArgumentException("Comando desconhecido: " + args[0]);
+        return registry.execute(args, CliConfig.load(Path.of("").toAbsolutePath(), null, null, Map.of()));
     }
 
     private static void awaitShutdown(String serverName) throws InterruptedException {
