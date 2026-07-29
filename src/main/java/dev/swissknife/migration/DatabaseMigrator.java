@@ -19,7 +19,12 @@ public final class DatabaseMigrator {
         try (var source = DriverManager.getConnection(config.sourceUrl(), config.sourceUser(), config.sourcePassword());
              var target = DriverManager.getConnection(config.targetUrl(), config.targetUser(), config.targetPassword())) {
             target.setAutoCommit(false);
-            try (var select = source.createStatement().executeQuery("SELECT * FROM " + config.sourceTable())) {
+            // O Statement precisa estar no try-with-resources (antes só o ResultSet estava) e o
+            // fetchSize precisa ser definido: sem ele, drivers como o do MySQL materializam a tabela
+            // inteira em memória no cliente antes da primeira linha — exatamente o oposto de migrar em lotes.
+            try (var statement = source.createStatement()) {
+                statement.setFetchSize(config.batchSize());
+                try (var select = statement.executeQuery("SELECT * FROM " + config.sourceTable())) {
                 var metadata = select.getMetaData();
                 int columns = metadata.getColumnCount();
                 String names = columnNames(metadata);
@@ -39,6 +44,7 @@ public final class DatabaseMigrator {
                     throw e;
                 }
                 return new Report(copied, columns, config.sourceTable(), config.targetTable());
+                }
             }
         }
     }
@@ -75,8 +81,13 @@ public final class DatabaseMigrator {
             MessageDigest digest = MessageDigest.getInstance("SHA-256");
             try (Connection source = DriverManager.getConnection(config.sourceUrl(), config.sourceUser(), config.sourcePassword());
                  Connection target = DriverManager.getConnection(config.targetUrl(), config.targetUser(), config.targetPassword())) {
+                if (resumedFrom > 0 && config.orderBy().isBlank())
+                    throw new IllegalArgumentException("resume=true exige a propriedade 'orderBy': retomar significa " +
+                        "pular as N primeiras linhas do SELECT, e sem ORDER BY a ordem das linhas não é garantida " +
+                        "entre execuções — a retomada duplicaria e perderia registros silenciosamente.");
                 String selectSql = "SELECT * FROM " + config.sourceTable() +
-                    (config.whereClause().isBlank() ? "" : " WHERE " + safeWhere(config.whereClause()));
+                    (config.whereClause().isBlank() ? "" : " WHERE " + safeWhere(config.whereClause())) +
+                    (config.orderBy().isBlank() ? "" : " ORDER BY " + safeOrderBy(config.orderBy()));
                 if (config.limit() > 0) source.setReadOnly(true);
                 target.setAutoCommit(false);
                 if (config.createTarget() && !config.dryRun())
@@ -156,7 +167,8 @@ public final class DatabaseMigrator {
             Boolean.parseBoolean(p.getProperty("dryRun", "false")),
             path(p.getProperty("checkpointFile")), path(p.getProperty("rejectFile")),
             Boolean.parseBoolean(p.getProperty("resume", "false")),
-            Boolean.parseBoolean(p.getProperty("createTarget", "false")), integer(p, "retries", 0));
+            Boolean.parseBoolean(p.getProperty("createTarget", "false")), integer(p, "retries", 0),
+            p.getProperty("orderBy", ""));
     }
 
     public ExportReport export(ConnectionConfig connection, String table, String where,
@@ -382,6 +394,18 @@ public final class DatabaseMigrator {
         }
         return where;
     }
+    /** ORDER BY aceita apenas "coluna [ASC|DESC]" separadas por vírgula — nada de expressões ou subqueries. */
+    private String safeOrderBy(String orderBy) {
+        for (String term : orderBy.split(",")) {
+            String[] parts = term.trim().split("\\s+");
+            if (parts.length == 0 || parts.length > 2)
+                throw new IllegalArgumentException("Termo de ORDER BY inválido: " + term);
+            validateIdentifier(parts[0]);
+            if (parts.length == 2 && !parts[1].matches("(?i)asc|desc"))
+                throw new IllegalArgumentException("Direção de ORDER BY inválida: " + parts[1]);
+        }
+        return orderBy;
+    }
     private String required(Properties p, String key) {
         String value = p.getProperty(key);
         if (value == null || value.isBlank()) throw new IllegalArgumentException(key + " é obrigatório");
@@ -420,14 +444,28 @@ public final class DatabaseMigrator {
                                  Map<String, String> columnMappings, Map<String, String> transforms,
                                  String conflictPolicy, String errorPolicy, boolean truncateTarget,
                                  boolean dryRun, Path checkpointFile, Path rejectFile,
-                                 boolean resume, boolean createTarget, int retries) {
+                                 boolean resume, boolean createTarget, int retries, String orderBy) {
         public AdvancedConfig {
             if (batchSize < 1) batchSize = 500;
             if (fetchSize < 1) fetchSize = batchSize;
             if (whereClause == null) whereClause = "";
+            if (orderBy == null) orderBy = "";
             if (retries < 0) retries = 0;
             columnMappings = columnMappings == null ? Map.of() : Map.copyOf(columnMappings);
             transforms = transforms == null ? Map.of() : Map.copyOf(transforms);
+        }
+        /** Compatibilidade: mantém a assinatura anterior à introdução de orderBy (expand-contract). */
+        public AdvancedConfig(String sourceUrl, String sourceUser, String sourcePassword, String sourceTable,
+                              String targetUrl, String targetUser, String targetPassword, String targetTable,
+                              int batchSize, int fetchSize, int limit, String whereClause,
+                              Map<String, String> columnMappings, Map<String, String> transforms,
+                              String conflictPolicy, String errorPolicy, boolean truncateTarget,
+                              boolean dryRun, Path checkpointFile, Path rejectFile,
+                              boolean resume, boolean createTarget, int retries) {
+            this(sourceUrl, sourceUser, sourcePassword, sourceTable, targetUrl, targetUser, targetPassword,
+                targetTable, batchSize, fetchSize, limit, whereClause, columnMappings, transforms,
+                conflictPolicy, errorPolicy, truncateTarget, dryRun, checkpointFile, rejectFile,
+                resume, createTarget, retries, "");
         }
         public AdvancedConfig(String sourceUrl, String sourceUser, String sourcePassword, String sourceTable,
                               String targetUrl, String targetUser, String targetPassword, String targetTable,
@@ -437,7 +475,7 @@ public final class DatabaseMigrator {
                               boolean dryRun, Path checkpointFile, Path rejectFile) {
             this(sourceUrl, sourceUser, sourcePassword, sourceTable, targetUrl, targetUser, targetPassword,
                 targetTable, batchSize, fetchSize, limit, whereClause, columnMappings, transforms,
-                conflictPolicy, errorPolicy, truncateTarget, dryRun, checkpointFile, rejectFile, false, false, 0);
+                conflictPolicy, errorPolicy, truncateTarget, dryRun, checkpointFile, rejectFile, false, false, 0, "");
         }
     }
     private record Mapping(int sourceIndex, String source, String target, String transform) {}
