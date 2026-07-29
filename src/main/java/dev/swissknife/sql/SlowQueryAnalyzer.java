@@ -125,14 +125,22 @@ public final class SlowQueryAnalyzer {
         return out.toString();
     }
 
-    /** Gera um relatório HTML consolidado da análise em lote. */
+    /**
+     * Gera um relatório HTML consolidado da análise em lote.
+     *
+     * Todo valor interpolado passa por escape(): o conteúdo NÃO é confiável. O SqlTokenizer devolve
+     * identificadores entre aspas com o texto bruto (por exemplo {@code FROM "<img src=x onerror=...>"}),
+     * então esse texto chega intacto em Analysis.table(); e nPlusOneFindings() carrega trechos crus do
+     * log analisado. Sem escape, um .sql/.log de terceiro vira XSS armazenado no relatório que o
+     * engenheiro abre no navegador — e slow-query-file/slow-query-log são expostos pelo portal.
+     */
     public String html(BatchAnalysis batch) {
         StringBuilder rows = new StringBuilder();
-        batch.analyses().forEach(a -> rows.append("<tr><td>").append(a.table()).append("</td><td>")
-            .append(a.statementType()).append("</td><td>").append(a.riskScore()).append("</td><td>")
-            .append(String.join("; ", a.warnings())).append("</td></tr>"));
+        batch.analyses().forEach(a -> rows.append("<tr><td>").append(escape(a.table())).append("</td><td>")
+            .append(escape(a.statementType())).append("</td><td>").append(a.riskScore()).append("</td><td>")
+            .append(escape(String.join("; ", a.warnings()))).append("</td></tr>"));
         StringBuilder nplus1 = new StringBuilder();
-        batch.nPlusOneFindings().forEach(f -> nplus1.append("<li>").append(f).append("</li>"));
+        batch.nPlusOneFindings().forEach(f -> nplus1.append("<li>").append(escape(f)).append("</li>"));
         return """
             <!doctype html><html lang="pt-BR"><head><meta charset="utf-8"><title>Relatório de queries lentas</title>
             <style>:root{color-scheme:light dark}body{font:15px system-ui;max-width:1100px;margin:auto;padding:2rem}
@@ -143,6 +151,11 @@ public final class SlowQueryAnalyzer {
             <table><thead><tr><th>Tabela</th><th>Tipo</th><th>Risco</th><th>Alertas</th></tr></thead><tbody>%s</tbody></table>
             </body></html>
             """.formatted(batch.statements(), batch.maximumRisk(), batch.averageRisk(), nplus1, rows);
+    }
+
+    private String escape(String value) {
+        return value == null ? "" : value.replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&#39;");
     }
 
     private int countMatches(Pattern pattern, String text) {

@@ -25,11 +25,29 @@ public final class HttpSupport {
     private static final String SCOPE_ATTRIBUTE = "swissknife.scope";
     private HttpSupport() {}
 
+    /**
+     * Origem das variáveis de ambiente consultadas por requisição (tokens, MFA, CORS).
+     *
+     * Existe como costura de teste: a JVM não permite alterar System.getenv no próprio processo, e
+     * sem esta indireção o caminho AUTENTICADO ficava sem nenhum teste — foi exatamente por ali que
+     * passou a regressão de escopo do SWISSKNIFE_API_TOKEN. Só o pacote consegue trocar a origem.
+     */
+    private static volatile java.util.function.UnaryOperator<String> environment = System::getenv;
+    public static void environmentForTesting(Map<String, String> values) {
+        environment = values == null ? System::getenv : values::get;
+    }
+    /** Zera janelas de rate limit/lockout e réplicas idempotentes entre casos de teste. */
+    public static void resetSecurityStateForTesting() {
+        FAILURES.clear(); RATE.clear(); IDEMPOTENCY.clear();
+    }
+    private static String env(String name) { return environment.apply(name); }
+
     private static final class FailureWindow { int count; long lockedUntil; }
     private static final class RateWindow { int count; long windowStart; }
 
     /** Lançada por requireScope/requireRole; authenticated() a converte em HTTP 403 Problem Details. */
     public static final class ForbiddenException extends RuntimeException {
+        private static final long serialVersionUID = 1L;
         public ForbiddenException(String message) { super(message); }
     }
 
@@ -52,11 +70,13 @@ public final class HttpSupport {
         exchange.getResponseHeaders().set("Referrer-Policy", "no-referrer");
         exchange.getResponseHeaders().set("Cache-Control", "no-store");
         exchange.getResponseHeaders().set("X-Request-ID", requestId(exchange));
-        String origin = System.getenv("SWISSKNIFE_CORS_ORIGIN");
+        String origin = env("SWISSKNIFE_CORS_ORIGIN");
         if (origin != null && !origin.isBlank())
             exchange.getResponseHeaders().set("Access-Control-Allow-Origin", origin);
         if (status == 200 && exchange.getRequestMethod().equals("GET")) {
-            String etag = "\"" + Integer.toHexString(Arrays.hashCode(body)) + "\"";
+            // ETag forte precisa mudar sempre que o corpo muda; um hash de 32 bits colide o bastante
+            // para o cliente receber 304 com a versão errada em cache.
+            String etag = "\"" + sha256(new String(body, StandardCharsets.UTF_8)).substring(0, 32) + "\"";
             exchange.getResponseHeaders().set("ETag", etag);
             String ifNoneMatch = exchange.getRequestHeaders().getFirst("If-None-Match");
             if (etag.equals(ifNoneMatch)) { exchange.sendResponseHeaders(304, -1); exchange.close(); return; }
@@ -84,13 +104,15 @@ public final class HttpSupport {
      * Suporte simples a chave de idempotência para POST: se a mesma Idempotency-Key com o
      * mesmo corpo já foi processada, repete a resposta anterior em vez de reexecutar o handler.
      */
+    private static final int MAX_IDEMPOTENCY_ENTRIES = Integer.parseInt(
+        System.getenv().getOrDefault("SWISSKNIFE_MAX_IDEMPOTENCY_ENTRIES", "10000"));
     private static final Map<String, IdempotentEntry> IDEMPOTENCY = new java.util.concurrent.ConcurrentHashMap<>();
     private record IdempotentEntry(String bodyHash, int status, byte[] response, long expiresAt) {}
     public static boolean replayIfIdempotent(HttpExchange exchange, String requestBody) throws IOException {
         String key = exchange.getRequestHeaders().getFirst("Idempotency-Key");
         if (key == null || key.isBlank()) return false;
         IdempotentEntry entry = IDEMPOTENCY.get(key);
-        String hash = Integer.toHexString(requestBody.hashCode());
+        String hash = sha256(requestBody);
         if (entry == null || entry.expiresAt() < System.currentTimeMillis() || !entry.bodyHash().equals(hash)) return false;
         exchange.getResponseHeaders().set("Content-Type", "application/json; charset=utf-8");
         exchange.getResponseHeaders().set("Idempotent-Replay", "true");
@@ -102,8 +124,31 @@ public final class HttpSupport {
         String key = exchange.getRequestHeaders().getFirst("Idempotency-Key");
         if (key == null || key.isBlank()) return;
         byte[] response = Json.stringify(payload).getBytes(StandardCharsets.UTF_8);
-        IDEMPOTENCY.put(key, new IdempotentEntry(Integer.toHexString(requestBody.hashCode()), status, response,
+        expireIdempotency();
+        IDEMPOTENCY.put(key, new IdempotentEntry(sha256(requestBody), status, response,
             System.currentTimeMillis() + Duration.ofHours(24).toMillis()));
+    }
+    /**
+     * O mapa de idempotência é alimentado por um header controlado pelo cliente: sem expurgo ele
+     * cresce sem limite (cada chave retém o corpo da resposta por 24h) e é um vetor trivial de
+     * exaustão de memória. Remove entradas vencidas e, se ainda estiver acima do teto, as mais antigas.
+     */
+    private static void expireIdempotency() {
+        long now = System.currentTimeMillis();
+        IDEMPOTENCY.values().removeIf(entry -> entry.expiresAt() < now);
+        if (IDEMPOTENCY.size() < MAX_IDEMPOTENCY_ENTRIES) return;
+        IDEMPOTENCY.entrySet().stream()
+            .sorted(Comparator.comparingLong(e -> e.getValue().expiresAt()))
+            .limit(Math.max(1, IDEMPOTENCY.size() - MAX_IDEMPOTENCY_ENTRIES + 1))
+            .map(Map.Entry::getKey).toList()
+            .forEach(IDEMPOTENCY::remove);
+    }
+    /** Hash forte para comparar corpos: hashCode() são 32 bits e uma colisão devolve a resposta de OUTRA requisição. */
+    private static String sha256(String value) {
+        try {
+            return HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256")
+                .digest(value.getBytes(StandardCharsets.UTF_8)));
+        } catch (java.security.NoSuchAlgorithmException e) { throw new IllegalStateException(e); }
     }
 
     public static Map<String, Object> body(HttpExchange exchange) throws IOException {
@@ -196,7 +241,7 @@ public final class HttpSupport {
                         return;
                     }
                     if ("admin".equals(matched.scope())) {
-                        String mfaSecret = System.getenv("SWISSKNIFE_MFA_SECRET");
+                        String mfaSecret = env("SWISSKNIFE_MFA_SECRET");
                         if (mfaSecret != null && !mfaSecret.isBlank()) {
                             String submittedCode = exchange.getRequestHeaders().getFirst("X-MFA-Code");
                             if (submittedCode == null || !Totp.verify(mfaSecret, submittedCode)) {
@@ -231,9 +276,13 @@ public final class HttpSupport {
      */
     private static List<ApiToken> configuredTokens() {
         List<ApiToken> tokens = new ArrayList<>();
-        String single = System.getenv("SWISSKNIFE_API_TOKEN");
-        if (single != null && !single.isBlank()) tokens.add(new ApiToken(single, "default", null));
-        String multiple = System.getenv("SWISSKNIFE_API_TOKENS");
+        String single = env("SWISSKNIFE_API_TOKEN");
+        // Escopo "admin": SWISSKNIFE_API_TOKEN é o mecanismo documentado no README para "ligar" a
+        // autenticação, e é um token único sem noção de papel. Emiti-lo com escopo "default" fazia
+        // requireScope() reprovar qualquer POST/PUT/DELETE com 403 — a API ficava somente-leitura assim
+        // que o usuário seguia o README. Escopos granulares continuam em SWISSKNIFE_API_TOKENS.
+        if (single != null && !single.isBlank()) tokens.add(new ApiToken(single, "admin", null));
+        String multiple = env("SWISSKNIFE_API_TOKENS");
         if (multiple != null && !multiple.isBlank()) {
             for (String entry : multiple.split(",")) {
                 String[] parts = entry.trim().split(":", 3);
@@ -256,14 +305,31 @@ public final class HttpSupport {
                 return token;
         return null;
     }
+    /**
+     * Teto de clientes rastreados. RATE/FAILURES são indexados pelo IP de origem — em IPv6 o
+     * atacante controla um espaço de endereços praticamente infinito, então mapas sem expurgo
+     * viram exaustão de memória (e, pior, o rate limit deixa de proteger porque o processo cai antes).
+     */
+    private static final int MAX_TRACKED_CLIENTS = Integer.parseInt(
+        System.getenv().getOrDefault("SWISSKNIFE_MAX_TRACKED_CLIENTS", "50000"));
+
     private static boolean checkRateLimit(String clientId) {
         long now = System.currentTimeMillis();
+        if (RATE.size() >= MAX_TRACKED_CLIENTS) evictStaleWindows(now);
         RateWindow window = RATE.computeIfAbsent(clientId, ignored -> new RateWindow());
         synchronized (window) {
             if (now - window.windowStart > 60_000) { window.windowStart = now; window.count = 0; }
             window.count++;
             return window.count <= RATE_LIMIT_PER_MINUTE;
         }
+    }
+    private static void evictStaleWindows(long now) {
+        RATE.values().removeIf(window -> { synchronized (window) { return now - window.windowStart > 60_000; } });
+        FAILURES.values().removeIf(window -> { synchronized (window) { return window.lockedUntil < now; } });
+        // Se todas as janelas ainda estiverem quentes, descarta o excedente: perder contagem de alguns
+        // clientes é preferível a derrubar o processo, e a janela se reconstrói em até 60s.
+        if (RATE.size() >= MAX_TRACKED_CLIENTS)
+            RATE.keySet().stream().limit(RATE.size() - MAX_TRACKED_CLIENTS + 1).toList().forEach(RATE::remove);
     }
     private static boolean isLockedOut(String clientId) {
         FailureWindow window = FAILURES.get(clientId);
