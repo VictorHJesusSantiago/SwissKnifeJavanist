@@ -49,9 +49,31 @@ public final class Json {
         } else write(value.toString(), out);
     }
 
+    /**
+     * Escapa conforme RFC 8259: além de {@code \} e {@code "}, cada caractere de controle
+     * (U+0000..U+001F) precisa virar escape. Trocar apenas \n\r\t deixava caracteres como
+     * U+0000/U+0008/U+001B crus dentro da string, produzindo JSON que parsers externos
+     * (SARIF do GitHub, CycloneDX, jq) rejeitam — e este projeto exporta exatamente esses formatos.
+     */
     private static String escape(String value) {
-        return value.replace("\\", "\\\\").replace("\"", "\\\"")
-            .replace("\n", "\\n").replace("\r", "\\r").replace("\t", "\\t");
+        var out = new StringBuilder(value.length() + 16);
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            switch (c) {
+                case '\\' -> out.append("\\\\");
+                case '"' -> out.append("\\\"");
+                case '\n' -> out.append("\\n");
+                case '\r' -> out.append("\\r");
+                case '\t' -> out.append("\\t");
+                case '\b' -> out.append("\\b");
+                case '\f' -> out.append("\\f");
+                default -> {
+                    if (c < 0x20) out.append(String.format("\\u%04x", (int) c));
+                    else out.append(c);
+                }
+            }
+        }
+        return out.toString();
     }
 
     public static Object parse(String json) {
@@ -67,8 +89,15 @@ public final class Json {
     }
 
     private static final class Parser {
+        /**
+         * Profundidade máxima de aninhamento. Sem este limite, um corpo como "[[[[[…" vindo de
+         * qualquer endpoint HTTP derruba a thread com StackOverflowError (que não é Exception e
+         * portanto escapa dos catch dos handlers). 200 níveis excedem qualquer documento legítimo.
+         */
+        private static final int MAX_DEPTH = 200;
         private final String text;
         private int pos;
+        private int depth;
         Parser(String text) { this.text = Objects.requireNonNull(text); }
 
         Object parse() {
@@ -93,13 +122,14 @@ public final class Json {
         }
 
         private Map<String, Object> object() {
+            enter();
             pos++;
             Map<String, Object> map = new LinkedHashMap<>();
             whitespace();
-            if (consume('}')) return map;
+            if (consume('}')) { depth--; return map; }
             do {
                 whitespace();
-                if (text.charAt(pos) != '"') fail("chave esperada");
+                if (pos >= text.length() || text.charAt(pos) != '"') fail("chave esperada");
                 var key = string();
                 whitespace();
                 if (!consume(':')) fail("':' esperado");
@@ -107,17 +137,24 @@ public final class Json {
                 whitespace();
             } while (consume(','));
             if (!consume('}')) fail("'}' esperado");
+            depth--;
             return map;
         }
 
         private List<Object> array() {
+            enter();
             pos++;
             List<Object> list = new ArrayList<>();
             whitespace();
-            if (consume(']')) return list;
+            if (consume(']')) { depth--; return list; }
             do { list.add(value()); whitespace(); } while (consume(','));
             if (!consume(']')) fail("']' esperado");
+            depth--;
             return list;
+        }
+
+        private void enter() {
+            if (++depth > MAX_DEPTH) fail("aninhamento JSON excede " + MAX_DEPTH + " níveis");
         }
 
         private String string() {
@@ -133,7 +170,7 @@ public final class Json {
                         case '"', '\\', '/' -> e;
                         case 'b' -> '\b'; case 'f' -> '\f'; case 'n' -> '\n';
                         case 'r' -> '\r'; case 't' -> '\t';
-                        case 'u' -> (char) Integer.parseInt(text.substring(pos, pos += 4), 16);
+                        case 'u' -> unicodeEscape();
                         default -> throw new IllegalArgumentException("Escape JSON inválido: " + e);
                     });
                 } else out.append(c);
@@ -142,13 +179,25 @@ public final class Json {
             return null;
         }
 
+        /** \\uXXXX truncado no fim do texto lançava StringIndexOutOfBounds (→ HTTP 500) em vez de erro de sintaxe (→ 400). */
+        private char unicodeEscape() {
+            if (pos + 4 > text.length()) fail("escape \\u incompleto");
+            String hex = text.substring(pos, pos + 4);
+            pos += 4;
+            try { return (char) Integer.parseInt(hex, 16); }
+            catch (NumberFormatException e) { throw new IllegalArgumentException("Escape \\u inválido: " + hex); }
+        }
+
         private Object number() {
             int start = pos;
             while (pos < text.length() && "-+0123456789.eE".indexOf(text.charAt(pos)) >= 0) pos++;
             try {
                 var n = text.substring(start, pos);
-                return n.contains(".") || n.contains("e") || n.contains("E")
-                    ? Double.parseDouble(n) : Long.parseLong(n);
+                // if/else, NÃO ternário: `cond ? Double.parseDouble(n) : Long.parseLong(n)` sofre
+                // promoção numérica binária (JLS 15.25) e promove o ramo long para double, boxando
+                // TODO inteiro como Double. Era por isso que contagens e nºs de linha saíam como 130.0.
+                if (n.contains(".") || n.contains("e") || n.contains("E")) return Double.parseDouble(n);
+                return Long.parseLong(n);
             } catch (NumberFormatException e) { fail("valor inválido"); return null; }
         }
 

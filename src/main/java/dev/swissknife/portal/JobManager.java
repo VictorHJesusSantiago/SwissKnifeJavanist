@@ -1,6 +1,6 @@
 package dev.swissknife.portal;
 
-import dev.swissknife.Main;
+import dev.swissknife.cli.CommandExecutor;
 import dev.swissknife.server.JsonStore;
 import java.io.IOException;
 import java.nio.file.Path;
@@ -17,14 +17,23 @@ public final class JobManager implements AutoCloseable {
         "security-scan","spring-audit","test-audit","config-audit","release-readiness","modernize",
         "jvm-diagnose","vuln-report","itam-report");
     private final ExecutorService executor;
+    /**
+     * Concorrência limitada por Semaphore sobre virtual-thread-per-task, e não por
+     * newFixedThreadPool com fábrica de virtual threads. Um pool fixo de virtual threads mantém N
+     * threads permanentemente bloqueadas na fila do pool, o que anula a razão de ser das virtual
+     * threads e ainda transforma a fila em um buffer ilimitado sem backpressure.
+     */
+    private final Semaphore slots;
+    private final CommandExecutor commandExecutor;
     private final ConcurrentMap<String,MutableJob> jobs=new ConcurrentHashMap<>();
     private final JsonStore store;
     private final int maxHistory;
     private final AtomicLong submitted=new AtomicLong(),completed=new AtomicLong(),failed=new AtomicLong(),cancelled=new AtomicLong();
 
-    public JobManager(Path database,int concurrency,int maxHistory)throws IOException{
-        executor=Executors.newFixedThreadPool(Math.max(1,Math.min(concurrency,32)),
-            Thread.ofVirtual().name("swissknife-job-",0).factory());
+    public JobManager(Path database,int concurrency,int maxHistory,CommandExecutor commandExecutor)throws IOException{
+        this.commandExecutor=Objects.requireNonNull(commandExecutor,"commandExecutor é obrigatório");
+        this.slots=new Semaphore(Math.max(1,Math.min(concurrency,32)));
+        this.executor=Executors.newThreadPerTaskExecutor(Thread.ofVirtual().name("swissknife-job-",0).factory());
         store=new JsonStore(database);this.maxHistory=Math.max(10,maxHistory);
         for(Map<String,Object> saved:store.all()){
             MutableJob job=MutableJob.restore(saved);
@@ -76,15 +85,28 @@ public final class JobManager implements AutoCloseable {
         return new Metrics(submitted.get(),completed.get(),failed.get(),cancelled.get(),running,queued,average,jobs.size());
     }
     private void run(MutableJob job){
-        synchronized(job){if(job.state==State.CANCELLED)return;job.state=State.RUNNING;job.startedAt=Instant.now();job.message="Executando";persist(job);}
-        try{
-            Object result=Main.execute(job.command.toArray(String[]::new));
-            synchronized(job){job.result=result;job.state=State.COMPLETED;job.progress=100;job.message="Concluído";job.finishedAt=Instant.now();completed.incrementAndGet();persist(job);}
-        }catch(InterruptedException e){
-            Thread.currentThread().interrupt();synchronized(job){job.state=State.CANCELLED;job.error="Interrompido";job.finishedAt=Instant.now();cancelled.incrementAndGet();persist(job);}
-        }catch(Throwable e){
-            synchronized(job){job.state=State.FAILED;job.error=safe(e);job.message="Falha";job.finishedAt=Instant.now();failed.incrementAndGet();persist(job);}
+        // Aguarda uma vaga ANTES de marcar RUNNING: enquanto espera, o job continua QUEUED para o
+        // cliente e um cancel() ainda o interrompe (acquire responde a interrupção).
+        try{ slots.acquire(); }
+        catch(InterruptedException e){
+            Thread.currentThread().interrupt();
+            synchronized(job){
+                if(!job.terminal()){job.state=State.CANCELLED;job.message="Cancelado antes de iniciar";
+                    job.finishedAt=Instant.now();cancelled.incrementAndGet();persist(job);}
+            }
+            return;
         }
+        try{
+            synchronized(job){if(job.terminal())return;job.state=State.RUNNING;job.startedAt=Instant.now();job.message="Executando";persist(job);}
+            try{
+                Object result=commandExecutor.execute(job.command.toArray(String[]::new));
+                synchronized(job){job.result=result;job.state=State.COMPLETED;job.progress=100;job.message="Concluído";job.finishedAt=Instant.now();completed.incrementAndGet();persist(job);}
+            }catch(InterruptedException e){
+                Thread.currentThread().interrupt();synchronized(job){job.state=State.CANCELLED;job.error="Interrompido";job.finishedAt=Instant.now();cancelled.incrementAndGet();persist(job);}
+            }catch(Throwable e){
+                synchronized(job){job.state=State.FAILED;job.error=safe(e);job.message="Falha";job.finishedAt=Instant.now();failed.incrementAndGet();persist(job);}
+            }
+        } finally { slots.release(); }
     }
     private void validate(List<String> command){
         if(command==null||command.isEmpty())throw new IllegalArgumentException("Comando vazio");
