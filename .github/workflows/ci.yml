@@ -18,6 +18,10 @@ jobs:
         with:
           distribution: temurin
           java-version: ${{ matrix.java }}
+      - if: runner.os != 'Windows'
+        name: Fitness function de arquitetura
+        shell: bash
+        run: chmod +x arch-check.sh && ./arch-check.sh
       - if: runner.os == 'Windows'
         shell: pwsh
         run: ./test.ps1
