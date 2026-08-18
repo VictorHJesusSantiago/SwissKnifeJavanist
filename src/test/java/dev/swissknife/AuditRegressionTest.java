@@ -44,13 +44,11 @@ public final class AuditRegressionTest {
         store.save(new LinkedHashMap<>(Map.of("id", "b", "v", "2")));
         store.delete("a");
 
-        // Reabrir aplica o log: a lápide de "a" deve tê-lo removido; "b" permanece.
         JsonStore reopened = new JsonStore(database);
         TestSupport.truth(reopened.find("a").isEmpty(), "Lápide deveria remover 'a' no reload");
         TestSupport.equal("2", reopened.find("b").orElseThrow().get("v"));
         TestSupport.equal(1, reopened.count());
 
-        // Gravações repetidas do mesmo id disparam a compactação; o valor final vence e a contagem fica 1.
         for (int i = 0; i < 1200; i++) reopened.save(new LinkedHashMap<>(Map.of("id", "b", "v", String.valueOf(i))));
         TestSupport.equal(1, reopened.count());
         TestSupport.equal("1199", new JsonStore(database).find("b").orElseThrow().get("v"));
@@ -81,7 +79,7 @@ public final class AuditRegressionTest {
         try {
             Json.parse("\"\\u12\"");
             throw new AssertionError("Escape \\u truncado deveria ser rejeitado");
-        } catch (IllegalArgumentException expected) { /* esperado */ }
+        } catch (IllegalArgumentException expected) {  }
     }
 
     /** Antes: após a rotação do log, verify() acusava "cadeia rompida" para sempre. */
@@ -95,8 +93,6 @@ public final class AuditRegressionTest {
         store.save(new LinkedHashMap<>(Map.of("id", "b", "value", "2")));
         TestSupport.truth(store.verify().auditValid(), "Cadeia deveria ser válida antes da rotação");
 
-        // Simula a rotação disparada por SWISSKNIFE_AUDIT_ROTATION_BYTES arquivando o log corrente
-        // e registrando a âncora — exatamente o que rotateAuditIfNeeded() faz ao exceder o limite.
         String lastHash = lastAuditHash(auditFile);
         Files.move(auditFile, directory.resolve("store.db.audit.jsonl.archive"));
         Files.writeString(directory.resolve("store.db.audit.anchor"), lastHash);

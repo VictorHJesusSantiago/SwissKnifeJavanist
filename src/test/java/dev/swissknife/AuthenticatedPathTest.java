@@ -24,7 +24,6 @@ public final class AuthenticatedPathTest {
             granularReadTokenCannotWrite();
             adminScopeRequiresMfaWhenConfigured();
         } finally {
-            // Restaura o ambiente real e limpa janelas para não vazar estado para outros testes.
             HttpSupport.environmentForTesting(null);
             HttpSupport.resetSecurityStateForTesting();
         }
@@ -35,7 +34,6 @@ public final class AuthenticatedPathTest {
         configure(Map.of("SWISSKNIFE_API_TOKEN", "s3cr3t"));
         withServer(port -> {
             TestSupport.equal(201, write(port, "Bearer s3cr3t", null).statusCode());
-            // GET continua permitido com o mesmo token.
             TestSupport.equal(200, read(port, "Bearer s3cr3t").statusCode());
         });
     }
@@ -69,7 +67,6 @@ public final class AuthenticatedPathTest {
         });
     }
 
-    // --- infraestrutura ---
 
     private static void configure(Map<String, String> env) {
         HttpSupport.resetSecurityStateForTesting();
