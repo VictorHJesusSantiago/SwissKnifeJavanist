@@ -79,7 +79,7 @@ public final class SqlParser {
         String name = current().text();
         advance();
         if (peekKeyword("AS")) advance();
-        if (!atEnd() && current().type() == SqlTokenizer.Type.IDENTIFIER && !isReservedNext()) advance(); // alias
+        if (!atEnd() && current().type() == SqlTokenizer.Type.IDENTIFIER && !isReservedNext()) advance();
         return unqualify(name);
     }
 

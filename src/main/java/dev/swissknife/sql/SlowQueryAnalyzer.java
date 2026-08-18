@@ -17,8 +17,6 @@ public final class SlowQueryAnalyzer {
         collect(JOIN, sql, columns);
         collect(ORDER, sql, columns);
         columns = new LinkedHashSet<>(columns.stream().map(this::unqualify).toList());
-        // Refina tabela/colunas/joins usando o parser SQL real (tokenizer + AST) quando a query é um SELECT
-        // reconhecível; a heurística por regex acima permanece como fallback para DML/DDL e queries malformadas.
         SqlParser.SelectStatement parsed = tryParseSelect(sql);
         if (parsed != null) {
             if (!parsed.table().isBlank()) table = parsed.table();
