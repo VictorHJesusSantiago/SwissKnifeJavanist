@@ -6,7 +6,6 @@ DEST=${SWISSKNIFE_HOME:-"$HOME/.swissknife"}
 mkdir -p "$DEST"
 cp "$ROOT/build/swissknife.jar" "$DEST/swissknife.jar"
 cat > "$DEST/swissknife" <<'EOF'
-#!/usr/bin/env sh
 exec java -jar "$(dirname "$0")/swissknife.jar" "$@"
 EOF
 chmod +x "$DEST/swissknife"
