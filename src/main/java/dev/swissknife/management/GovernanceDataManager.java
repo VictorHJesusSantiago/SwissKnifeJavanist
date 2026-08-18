@@ -127,8 +127,6 @@ public final class GovernanceDataManager {
             if(!"ACCEPTED".equals(item.get("status"))) continue;
             LocalDate until=date(item.get("acceptedUntil"));
             if(until==null||!until.isBefore(LocalDate.now())) continue;
-            // Reutiliza o mesmo store: abrir um por item além de quadrático deixava o store externo
-            // desatualizado em relação às gravações feitas pelas instâncias internas.
             reverted.add(vulnerabilityTransition(store,String.valueOf(item.get("id")),"OPEN","system",
                 "Aceitação de risco expirada em "+until));
         }
@@ -254,8 +252,6 @@ public final class GovernanceDataManager {
         if(purchaseDate==null||usefulLifeYears<=0) return purchaseValue;
         double yearsElapsed=ChronoUnit.DAYS.between(purchaseDate,LocalDate.now())/365.25;
         double remaining=1.0-Math.min(1.0,Math.max(0,yearsElapsed/usefulLifeYears));
-        // A razão de depreciação é intrinsecamente fracionária (dias/365.25); mantê-la em double é
-        // correto. O dinheiro é que não pode ser double: arredonda o resultado para 2 casas HALF_UP.
         return purchaseValue.multiply(java.math.BigDecimal.valueOf(remaining))
             .setScale(2,java.math.RoundingMode.HALF_UP);
     }

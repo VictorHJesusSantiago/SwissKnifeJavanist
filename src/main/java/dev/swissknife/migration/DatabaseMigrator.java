@@ -19,9 +19,6 @@ public final class DatabaseMigrator {
         try (var source = DriverManager.getConnection(config.sourceUrl(), config.sourceUser(), config.sourcePassword());
              var target = DriverManager.getConnection(config.targetUrl(), config.targetUser(), config.targetPassword())) {
             target.setAutoCommit(false);
-            // O Statement precisa estar no try-with-resources (antes só o ResultSet estava) e o
-            // fetchSize precisa ser definido: sem ele, drivers como o do MySQL materializam a tabela
-            // inteira em memória no cliente antes da primeira linha — exatamente o oposto de migrar em lotes.
             try (var statement = source.createStatement()) {
                 statement.setFetchSize(config.batchSize());
                 try (var select = statement.executeQuery("SELECT * FROM " + config.sourceTable())) {
@@ -233,9 +230,6 @@ public final class DatabaseMigrator {
         }
     }
     private List<Mapping> mappings(ResultSetMetaData metadata, AdvancedConfig config) throws SQLException {
-        // Bancos como H2/Oracle/DB2 reportam nomes de coluna em MAIÚSCULAS por padrão via JDBC,
-        // mesmo quando o usuário digitou o mapeamento/transformação em minúsculas na configuração;
-        // por isso a busca precisa ser case-insensitive, nunca getOrDefault() direto.
         Map<String, String> columnMappings = caseInsensitive(config.columnMappings());
         Map<String, String> transforms = caseInsensitive(config.transforms());
         List<Mapping> result = new ArrayList<>();
@@ -305,7 +299,7 @@ public final class DatabaseMigrator {
         try {
             Object parsed = Json.parse(Files.readString(checkpointFile));
             if (parsed instanceof Map<?, ?> map && map.get("read") instanceof Number n) return n.intValue();
-        } catch (Exception ignored) { /* checkpoint corrompido é tratado como ausente */ }
+        } catch (Exception ignored) {  }
         return 0;
     }
     private void createTargetIfMissing(Connection source, Connection target, AdvancedConfig config) throws SQLException {
