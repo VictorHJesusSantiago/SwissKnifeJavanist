@@ -1,5 +1,3 @@
-# Template de GitLab CI para SwissKnife Javanist.
-# Copie para .gitlab-ci.yml na raiz do projeto e ajuste os caminhos conforme necessário.
 stages:
   - governance
 

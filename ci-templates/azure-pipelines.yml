@@ -1,5 +1,3 @@
-# Template de Azure DevOps Pipeline para SwissKnife Javanist.
-# Copie para azure-pipelines.yml na raiz do projeto e ajuste os caminhos conforme necessário.
 trigger:
   branches:
     include: [main]
