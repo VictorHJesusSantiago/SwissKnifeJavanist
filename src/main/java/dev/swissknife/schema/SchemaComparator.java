@@ -500,10 +500,6 @@ public final class SchemaComparator {
         final Map<String, Constraint> constraints = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
         final Map<String, Index> indexes = new TreeMap<>(String.CASE_INSENSITIVE_ORDER);
         MutableTable(String name) { this.name = name; }
-        // Map.copyOf() NÃO preserva o comparator case-insensitive do TreeMap de origem — ele copia as
-        // entradas para um mapa comum, o que reintroduziria comparação sensível a maiúsculas/minúsculas
-        // (relevante ao comparar DDL escrito em minúsculas com bancos que uppercase identificadores, como H2/Oracle).
-        // Por isso envolvemos em unmodifiableSortedMap sobre uma NOVA TreeMap com o mesmo comparator.
         Table freeze() {
             return new Table(name, caseInsensitiveCopy(columns), caseInsensitiveCopy(constraints), caseInsensitiveCopy(indexes));
         }

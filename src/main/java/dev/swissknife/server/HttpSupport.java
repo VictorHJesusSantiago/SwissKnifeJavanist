@@ -74,8 +74,6 @@ public final class HttpSupport {
         if (origin != null && !origin.isBlank())
             exchange.getResponseHeaders().set("Access-Control-Allow-Origin", origin);
         if (status == 200 && exchange.getRequestMethod().equals("GET")) {
-            // ETag forte precisa mudar sempre que o corpo muda; um hash de 32 bits colide o bastante
-            // para o cliente receber 304 com a versão errada em cache.
             String etag = "\"" + sha256(new String(body, StandardCharsets.UTF_8)).substring(0, 32) + "\"";
             exchange.getResponseHeaders().set("ETag", etag);
             String ifNoneMatch = exchange.getRequestHeaders().getFirst("If-None-Match");
@@ -277,10 +275,6 @@ public final class HttpSupport {
     private static List<ApiToken> configuredTokens() {
         List<ApiToken> tokens = new ArrayList<>();
         String single = env("SWISSKNIFE_API_TOKEN");
-        // Escopo "admin": SWISSKNIFE_API_TOKEN é o mecanismo documentado no README para "ligar" a
-        // autenticação, e é um token único sem noção de papel. Emiti-lo com escopo "default" fazia
-        // requireScope() reprovar qualquer POST/PUT/DELETE com 403 — a API ficava somente-leitura assim
-        // que o usuário seguia o README. Escopos granulares continuam em SWISSKNIFE_API_TOKENS.
         if (single != null && !single.isBlank()) tokens.add(new ApiToken(single, "admin", null));
         String multiple = env("SWISSKNIFE_API_TOKENS");
         if (multiple != null && !multiple.isBlank()) {
@@ -326,8 +320,6 @@ public final class HttpSupport {
     private static void evictStaleWindows(long now) {
         RATE.values().removeIf(window -> { synchronized (window) { return now - window.windowStart > 60_000; } });
         FAILURES.values().removeIf(window -> { synchronized (window) { return window.lockedUntil < now; } });
-        // Se todas as janelas ainda estiverem quentes, descarta o excedente: perder contagem de alguns
-        // clientes é preferível a derrubar o processo, e a janela se reconstrói em até 60s.
         if (RATE.size() >= MAX_TRACKED_CLIENTS)
             RATE.keySet().stream().limit(RATE.size() - MAX_TRACKED_CLIENTS + 1).toList().forEach(RATE::remove);
     }
@@ -350,7 +342,7 @@ public final class HttpSupport {
             String event = Json.stringify(Map.of("timestamp", java.time.Instant.now().toString(), "client", clientId,
                 "path", path, "success", success, "detail", detail)) + System.lineSeparator();
             Files.writeString(AUTH_LOG, event, StandardCharsets.UTF_8, StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-        } catch (IOException ignored) { /* auditoria não deve derrubar a requisição */ }
+        } catch (IOException ignored) {  }
     }
     private record ApiToken(String value, String scope, java.time.Instant expiresAt) {}
 

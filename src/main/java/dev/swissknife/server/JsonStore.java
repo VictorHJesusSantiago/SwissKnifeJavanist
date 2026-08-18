@@ -152,9 +152,6 @@ public final class JsonStore {
                 if (!Objects.equals(id, String.valueOf(value.get("id")))) errors.add("ID divergente: " + id);
             });
             boolean auditValid = verifyAudit(errors);
-            // String.join, não reduce((a,b)->a+b): a concatenação em reduce cria uma String nova a
-            // cada registro, tornando o checksum O(n²) em tempo e memória justo na operação usada
-            // para verificar bases grandes.
             return new Verification(errors.isEmpty(), records.size(), errors, auditValid,
                 checksum(String.join("\n", records.values().stream().map(Json::stringify).toList())));
         } finally { lock.readLock().unlock(); }
