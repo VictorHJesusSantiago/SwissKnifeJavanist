@@ -85,8 +85,6 @@ public final class JobManager implements AutoCloseable {
         return new Metrics(submitted.get(),completed.get(),failed.get(),cancelled.get(),running,queued,average,jobs.size());
     }
     private void run(MutableJob job){
-        // Aguarda uma vaga ANTES de marcar RUNNING: enquanto espera, o job continua QUEUED para o
-        // cliente e um cancel() ainda o interrompe (acquire responde a interrupção).
         try{ slots.acquire(); }
         catch(InterruptedException e){
             Thread.currentThread().interrupt();

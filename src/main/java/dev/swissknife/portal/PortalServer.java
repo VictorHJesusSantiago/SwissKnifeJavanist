@@ -91,10 +91,6 @@ public final class PortalServer {
                     else jobs.find(suffix).ifPresentOrElse(job->send(exchange,200,job),()->send(exchange,404,Map.of("error","Job não encontrado")));
                 }
                 case"POST"->{
-                    // Submeter um job executa uma análise no processo do portal e vários comandos da
-                    // allowlist gravam artefatos em disco (deps-export, schema-script, docs-site...).
-                    // Isso é uma escrita: sem requireScope, um token somente-leitura obtinha execução
-                    // de código/escrita de arquivos aqui, enquanto os backends barram o mesmo token.
                     HttpSupport.requireScope(exchange,"write","admin");
                     if(!suffix.isBlank()){HttpSupport.json(exchange,404,Map.of("error","Rota inválida"));return;}
                     Map<String,Object> body=HttpSupport.body(exchange);
@@ -149,7 +145,7 @@ public final class PortalServer {
                     out.flush();
                     try{Thread.sleep(2000);}catch(InterruptedException e){Thread.currentThread().interrupt();return;}
                 }
-            } catch(IOException clientDisconnected){ /* cliente fechou a conexão; encerra o stream silenciosamente */ }
+            } catch(IOException clientDisconnected){  }
         } finally { active.decrementAndGet(); }
     }
     private void send(HttpExchange exchange,int status,Object value){try{HttpSupport.json(exchange,status,value);}catch(IOException e){throw new RuntimeException(e);}}
