@@ -24,9 +24,6 @@ public final class ContractTester {
             runPhase(root.get("setup"), variables, redact);
             List<Result> results;
             if (parallel) {
-                // Execução concorrente: cada contrato roda com sua própria cópia das variáveis capturadas
-                // até aqui (via setup). Extrações feitas por um contrato NÃO ficam visíveis para os outros
-                // nesta rodada — encadeamento (extract/${var}) exige execução sequencial (parallel=false).
                 var executor = java.util.concurrent.Executors.newVirtualThreadPerTaskExecutor();
                 List<java.util.concurrent.Future<Result>> futures = new ArrayList<>();
                 for (Object item : contracts) {

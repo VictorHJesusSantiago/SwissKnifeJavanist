@@ -67,7 +67,6 @@ public final class SecurityScanner {
             if (days < 30) findings.add(new Finding("CERTIFICATE_EXPIRY", days < 0 ? "CRITICAL" : "HIGH",
                 root.relativize(file).toString(), 1, "Certificado expira em " + days + " dia(s).", ""));
         } catch (Exception ignored) {
-            // Arquivos PEM também podem conter chaves ou cadeias; as regras textuais continuam válidas.
         }
     }
     private int lineOf(String value, int offset) { return (int) value.substring(0, offset).lines().count(); }
@@ -85,16 +84,10 @@ public final class SecurityScanner {
      * literais, e linhas anotadas com supressão explícita. Reduz o ruído sem esconder um segredo real.
      */
     private boolean isSuppressed(Rule rule, Matcher matcher, String line) {
-        // 1) Supressão explícita, revisada: `// nosec` ou `swissknife:allow-secret` na linha.
         if (line.contains("nosec") || line.contains("swissknife:allow-secret")) return true;
-        // 2) Auto-exclusão: a linha é uma definição de regra (Pattern.compile / new Rule) — é o
-        //    próprio scanner, não um segredo. Cobre as 5 ocorrências que eram as regex das regras.
         if (line.contains("Pattern.compile(") || line.contains("new Rule(")) return true;
-        // 3) Só GENERIC_SECRET produz o "referencia mas não é literal"; as demais regras casam formatos
-        //    específicos (AKIA…, -----BEGIN…) que não têm essa ambiguidade.
         if (!"GENERIC_SECRET".equals(rule.id())) return false;
         String value = matcher.groupCount() >= 2 ? matcher.group(2) : matcher.group();
-        // O valor está entre aspas? Um literal de segredo real está; uma expressão de código não.
         int valueStart = matcher.groupCount() >= 2 ? matcher.start(2) : matcher.start();
         boolean quoted = valueStart > 0 && isQuote(matcher.group().isEmpty() ? '\0'
             : contentCharBefore(valueStart));
@@ -109,14 +102,9 @@ public final class SecurityScanner {
     private static boolean isQuote(char c) { return c == '"' || c == '\''; }
 
     private boolean referencesSecretButIsNotLiteral(String value, String line, boolean quoted) {
-        // Expressão de código, não literal: qualquer chamada/aninhamento com parênteses fora de aspas
-        // (token(...), Totp.generateSecret(), current(), tokens.group()).
         if (!quoted && (value.indexOf('(') >= 0 || value.indexOf(')') >= 0)) return true;
-        // Chamada de método/expressão em vez de literal: getPassword(), env("…"), config.get(…).
         if (line.matches(".*(?:get|read|load|fetch|resolve|env)\\w*\\s*\\(.*")) return true;
-        // CONSTANTE_OU_VARIAVEL: nome de identificador (maiúsculas com _, ou dotted), não um segredo.
         if (value.matches("[A-Z0-9_]+") || value.matches("[A-Za-z_][A-Za-z0-9_]*(?:\\.[A-Za-z_][A-Za-z0-9_]*)+")) return true;
-        // Placeholders óbvios de exemplo/config.
         String lowered = value.toLowerCase(Locale.ROOT);
         return lowered.contains("example") || lowered.contains("changeme") || lowered.contains("your_")
             || lowered.contains("xxxx") || lowered.startsWith("${") || lowered.startsWith("{{");

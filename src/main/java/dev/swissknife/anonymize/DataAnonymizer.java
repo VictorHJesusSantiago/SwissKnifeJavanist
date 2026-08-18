@@ -128,9 +128,6 @@ public final class DataAnonymizer {
     }
 
     public DetectionReport detect(Path input) throws IOException {
-        // Csv.splitRecords (e não readAllLines) pelo mesmo motivo de anonymize(): um campo entre
-        // aspas com quebra de linha conta como UM registro. Com readAllLines as colunas saíam
-        // deslocadas a partir da primeira célula multilinha e a detecção de PII apontava o campo errado.
         List<String> lines = Csv.splitRecords(Files.readString(input, StandardCharsets.UTF_8));
         if (lines.isEmpty()) return new DetectionReport(List.of(), 0);
         List<String> headers = Csv.parseLine(lines.getFirst());
@@ -175,8 +172,6 @@ public final class DataAnonymizer {
             case "phone" -> "+5500000" + String.format("%04d", row % 10_000);
             case "cpf" -> cpf(hash(salt() + value));
             case "cnpj" -> cnpj(hash(salt() + value));
-            // CEP derivado de SHA-256 com sal, não de String.hashCode(): o espaço de CEPs tem apenas
-            // 10^8 valores, então um hashCode não salgado é invertível por força bruta em segundos.
             case "cep" -> cep(hash(salt() + value));
             case "uuid" -> UUID.nameUUIDFromBytes((salt() + value).getBytes(StandardCharsets.UTF_8)).toString();
             default -> throw new IllegalArgumentException("Estratégia desconhecida: " + strategy);
