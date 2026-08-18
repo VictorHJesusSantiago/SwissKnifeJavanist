@@ -51,7 +51,7 @@ public final class Main {
                 key.reset();
                 if (!relevant) continue;
                 Thread.sleep(300);
-                while (watcher.poll() != null) { /* drena rajada de eventos consecutivos */ }
+                while (watcher.poll() != null) {  }
                 System.out.println("\n[watch] mudança detectada, reexecutando " + String.join(" ", args) + "...");
                 runOnce(args, false);
             }
@@ -224,7 +224,7 @@ public final class Main {
                 "timestamp", java.time.Instant.now().toString(), "java", Runtime.version().feature())) + System.lineSeparator();
             Files.writeString(file, event, java.nio.charset.StandardCharsets.UTF_8,
                 StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-        } catch (Exception ignored) { /* telemetria opt-in nunca deve quebrar o comando */ }
+        } catch (Exception ignored) {  }
     }
 
     public static Object execute(String[] args) throws Exception {

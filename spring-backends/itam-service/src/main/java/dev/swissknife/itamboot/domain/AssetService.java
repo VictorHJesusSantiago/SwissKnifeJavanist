@@ -32,8 +32,6 @@ public class AssetService {
 
     @Transactional(readOnly=true)
     public List<Asset> list(Asset.Status status,Asset.Type type,String owner,String query,int page,int size){
-        // allOf() sem argumentos = conjunção vazia (irrestrita); substitui Specification.where(null),
-        // depreciado no Spring Data JPA 3.5 por aceitar null silenciosamente.
         Specification<Asset> spec=Specification.allOf();
         if(status!=null) spec=spec.and((root,cq,cb)->cb.equal(root.get("status"),status));
         if(type!=null) spec=spec.and((root,cq,cb)->cb.equal(root.get("type"),type));
