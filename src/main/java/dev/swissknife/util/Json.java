@@ -193,9 +193,6 @@ public final class Json {
             while (pos < text.length() && "-+0123456789.eE".indexOf(text.charAt(pos)) >= 0) pos++;
             try {
                 var n = text.substring(start, pos);
-                // if/else, NÃO ternário: `cond ? Double.parseDouble(n) : Long.parseLong(n)` sofre
-                // promoção numérica binária (JLS 15.25) e promove o ramo long para double, boxando
-                // TODO inteiro como Double. Era por isso que contagens e nºs de linha saíam como 130.0.
                 if (n.contains(".") || n.contains("e") || n.contains("E")) return Double.parseDouble(n);
                 return Long.parseLong(n);
             } catch (NumberFormatException e) { fail("valor inválido"); return null; }

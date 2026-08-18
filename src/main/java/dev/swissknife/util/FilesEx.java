@@ -38,8 +38,6 @@ public final class FilesEx {
         try {
             List<String> command = new ArrayList<>(List.of("git"));
             command.addAll(List.of(gitArgs));
-            // redirectErrorStream evita deadlock: se stderr não for drenado e encher o pipe, o processo
-            // filho trava indefinidamente esperando alguém ler, e waitFor nunca retorna.
             process = new ProcessBuilder(command).directory(root.toFile()).redirectErrorStream(true).start();
             String output = new String(process.getInputStream().readAllBytes(), StandardCharsets.UTF_8);
             if (process.waitFor(10, java.util.concurrent.TimeUnit.SECONDS)) {
@@ -49,7 +47,7 @@ public final class FilesEx {
             } else {
                 process.destroyForcibly();
             }
-        } catch (Exception ignored) { /* fora de um repositório Git, simplesmente não há arquivos "alterados" */ }
+        } catch (Exception ignored) {  }
         finally { if (process != null) process.destroyForcibly(); }
     }
 
@@ -65,7 +63,7 @@ public final class FilesEx {
                 if (pattern.endsWith("/")) pattern += "**";
                 if (!pattern.contains("/")) pattern = "**/" + pattern;
                 try { result.add(FileSystems.getDefault().getPathMatcher("glob:" + pattern)); }
-                catch (Exception ignored) { /* padrão inválido não deve impedir a análise */ }
+                catch (Exception ignored) {  }
             }
         }
         return result;
